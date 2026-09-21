@@ -78,6 +78,25 @@ set(boba_defines "") # see SetupOptions.cmake
 # Include build system logic and options
 #------------------------------------------------------------------------------
 include(CMakeDependentOption)
+
+#------------------------------------------------------------------------------
+# Optional Python bindings
+#------------------------------------------------------------------------------
+# Off by default, so an ordinary C++ build never needs Python or pybind11. The pip /
+# scikit-build-core path turns it on.
+option(BOBA_BUILD_PYTHON "Build the BoBa Python bindings" OFF)
+
+if(BOBA_BUILD_PYTHON)
+  # A wheel build is normally driven by pip, which has nowhere to pass these, so fall
+  # back to the repository's own TPL layout when the caller did not point elsewhere.
+  if(NOT BLT_SOURCE_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tpl/blt/SetupBLT.cmake")
+    set(BLT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tpl/blt" CACHE PATH "")
+  endif()
+  if(NOT EIGEN_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/install/eigen_cpu")
+    set(EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/install/eigen_cpu" CACHE PATH "")
+  endif()
+endif()
+
 include(cmake/SetupBoBaBLT.cmake)
 include(cmake/CMakeBasics.cmake)
 
@@ -276,3 +295,7 @@ if(boba_license_index_files)
 endif()
 
 add_subdirectory(examples)
+
+if(BOBA_BUILD_PYTHON)
+  add_subdirectory(python)
+endif()

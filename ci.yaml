@@ -324,6 +324,10 @@
     test_cross:
       skip: [cuda, hip]
 
+  test_python_runtime_parity:
+    test_python_runtime_parity:
+      skip: [cuda, hip]
+
   test_preconditioner:
     test_preconditioned_gmres:
       inputs: "--method 0"

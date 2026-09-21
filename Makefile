@@ -88,6 +88,7 @@ all: \
 	test_cp \
 	test_tensor_completion \
 	test_cross \
+	test_python_runtime_parity \
 	test_cur \
 	test_block_operator \
 	test_amen_block \
@@ -542,6 +543,22 @@ test_cross${NAME_FLAG}.o: ${TESTS_DIR}/test_cross.cpp ${BOBA_INC} boba${NAME_FLA
 	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_cross.cpp -o test_cross${NAME_FLAG}.o
 else
 test_cross:
+	echo "Skipping $@${NAME_FLAG}.out"
+endif
+###############################
+# Parity between native BoBa and the runtime-dimensional implementation used by the
+# Python bindings. This builds plain C++ only; it does not require Python or pybind11.
+ifdef BOBA_CPU
+test_python_runtime_parity: test_python_runtime_parity${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_python_runtime_parity${NAME_FLAG}.out: test_python_runtime_parity${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_python_runtime_parity${NAME_FLAG}.o: ${TESTS_DIR}/test_python_runtime_parity.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_python_runtime_parity.cpp -o test_python_runtime_parity${NAME_FLAG}.o
+else
+test_python_runtime_parity:
 	echo "Skipping $@${NAME_FLAG}.out"
 endif
 ###############################

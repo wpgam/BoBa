@@ -90,6 +90,7 @@ LLNL-CODE-2022014
 - CMake target wiring: [`cmake/SetupMacros.cmake`](cmake/SetupMacros.cmake)
 - Repository-wide contributor and agent guidance: [`AGENTS.md`](AGENTS.md)
 - Repository-local skill index: [`skills/SKILLS.md`](skills/SKILLS.md)
+- Python bindings (`pyboba`): [`python/`](python) and [`tests/python/`](tests/python)
 
 ## Installing TPLs
 
@@ -133,6 +134,223 @@ This is an excellent test to make sure the code compiles for the given system co
 ```
 ./test_boba_tensor_train_cpu.out
 ```
+
+## Python interface
+
+BoBa ships an optional Python package, `pyboba`, that exposes tensor trains: dense
+compression, DMRG cross approximation from a Python callable, dense reconstruction and
+entry evaluation. It is a thin, private pybind11 extension over BoBa's own numerical kernels —
+NumPy is only the interchange format, never the compute backend.
+
+### Prerequisites
+
+The Python package builds the BoBa library from source, so the usual BoBa build
+prerequisites apply first:
+
+- a C++20 compiler
+- CMake 3.21 or newer
+- BoBa's third-party libraries, installed with `./boba_builder.py`
+- BLT, which lives in the `tpl/blt` submodule (`git submodule update --init tpl/blt`)
+
+The build looks for BLT in `tpl/blt` and Eigen in `install/eigen_cpu`, which is where
+`boba_builder.py` places them. Point somewhere else with the `CMAKE_ARGS` environment
+variable:
+
+```bash
+CMAKE_ARGS="-DEIGEN_DIR=/path/to/eigen -DBLT_SOURCE_DIR=/path/to/blt" python -m pip install .
+```
+
+`pybind11` and `scikit-build-core` are declared as build dependencies in
+`pyproject.toml`, so pip fetches them automatically. A normal C++ BoBa build needs
+neither Python nor pybind11: the bindings are behind the `BOBA_BUILD_PYTHON` CMake
+option, which defaults to `OFF`.
+
+### Installing
+
+```bash
+python -m pip install .
+```
+
+or, for development:
+
+```bash
+python -m pip install -e .
+```
+
+Then:
+
+```python
+import pyboba
+```
+
+The public surface is `pyboba.TensorTrain`, `pyboba.compress` and `pyboba.cross`. The compiled
+module `pyboba._pyboba` is an implementation detail and should not be imported directly.
+
+### Dense compression
+
+```python
+import numpy as np
+import pyboba
+
+rng = np.random.default_rng(42)
+a = rng.normal(size=(5, 7, 4)).astype(np.float32)
+
+tt = pyboba.compress(a)
+
+assert tt.shape == (5, 7, 4)
+assert tt.ndim == 3
+assert tt.dtype == np.dtype(np.float32)
+
+a_hat = tt.to_numpy()
+```
+
+`compress` runs BoBa's TT-SVD. Accuracy and size are controlled with `rtol`, `atol` and
+`max_rank`, which map to BoBa's `svd_tolerance_relative`, `svd_tolerance_absolute` and
+`max_kept_singular_values`:
+
+```python
+tt = pyboba.compress(a, rtol=1e-6, max_rank=8)
+```
+
+### Cross approximation from a callable
+
+`pyboba.cross` approximates a tensor that is never stored, sampling it only at the entries
+the DMRG sweep selects.
+
+```python
+import numpy as np
+import pyboba
+
+shape = (8, 9, 10, 7)
+
+def f(index):
+    i, j, k, l = index
+    return 1.0 / (1.0 + i + j + k + l)
+
+tt = pyboba.cross(
+    shape,
+    f,
+    initial_rank=3,
+    tolerance=1e-7,
+    n_sweeps=10,
+    selection="maxvol",
+    dtype=np.float64,
+)
+
+value = tt[2, 3, 4, 1]
+```
+
+The scalar callback receives a tuple of zero-based Python integers of length
+`len(shape)`.
+
+`initial_rank` accepts either an integer, applied to every interior interface, or a
+sequence of exactly `len(shape) - 1` interior ranks; the unit boundary ranks are
+implicit. A rank larger than the interface can mathematically carry raises `ValueError`
+rather than being silently truncated.
+
+### Vectorized callbacks
+
+Passing `vectorized=True` switches to a batched protocol, which is substantially faster
+because it collapses many C++-to-Python transitions into one call:
+
+```python
+import numpy as np
+import pyboba
+
+shape = (12, 11, 10, 9)
+
+def f(indices):
+    return np.exp(-0.01 * np.sum(indices.astype(np.float64) ** 2, axis=1))
+
+tt = pyboba.cross(shape, f, initial_rank=4, vectorized=True, dtype=np.float64)
+```
+
+The callback receives a C-contiguous `int64` array of shape `(N, len(shape))` and must
+return `N` real values. `vectorized` is an explicit switch: the callable is never probed
+to guess which protocol it implements.
+
+Exceptions raised inside either callback propagate to the caller unchanged and abort the
+sweep cleanly.
+
+### Submatrix selection
+
+`selection="maxvol"` (the default, matching BoBa's C++ default) and `selection="deim"`
+map onto BoBa's existing MAXVOL and DEIM implementations. Any other value raises
+`ValueError`.
+
+### Tensor train API
+
+| Member | Meaning |
+| --- | --- |
+| `tt.ndim` | Number of tensor modes |
+| `tt.shape` | Tuple of mode extents |
+| `tt.ranks` | All `ndim + 1` interface ranks, `(1, r1, ..., 1)` |
+| `tt.dtype` | NumPy dtype, comparable with `np.dtype(...)` |
+| `tt.cores` | List of NumPy arrays shaped `(left_rank, mode_size, right_rank)` |
+| `tt.to_numpy()` | Dense reconstruction with exactly `tt.shape` |
+| `tt[i, j, k]` | Single entry from a complete multi-index |
+| `repr(tt)` | e.g. `TensorTrain(shape=(8, 9, 10), ranks=(1, 4, 5, 1), dtype=float64)` |
+
+Indices are zero-based and must be non-negative; negative indexing and slicing are
+rejected with a clear error rather than silently reinterpreted. Entry evaluation
+contracts only the selected core slices, so it is far cheaper than `to_numpy()`.
+
+`to_numpy()` raises `MemoryError` when the dense size cannot be represented — worth
+remembering, since a tensor train with many modes routinely describes a dense tensor far
+larger than any machine.
+
+### Supported dtypes
+
+`float32` and `float64`. Complex types are not exposed yet.
+
+`compress` takes its dtype from the input array and rejects any other dtype rather than
+converting silently, so convert explicitly if needed:
+
+```python
+tt = pyboba.compress(np.asarray(a, dtype=np.float64))
+```
+
+`cross` has no input array to infer from, so it takes `dtype=` and defaults to
+`float64`.
+
+### Runtime dimensionality
+
+The tensor dimension is a runtime value. The extension contains no per-dimension
+instantiation table and no dimension dispatch, so there is no artificial maximum `ndim`;
+the practical limits are memory, integer range and the algorithm itself.
+
+```python
+shape = (2,) * 33
+tt = pyboba.cross(shape, lambda index: 1.0 + sum(index), initial_rank=2)
+assert tt.ndim == 33
+```
+
+### Memory ownership
+
+In this first release every exchange with NumPy is a copy. Input arrays are copied into
+BoBa-owned storage, and `tt.cores` and `tt.to_numpy()` return freshly allocated NumPy
+arrays. Nothing returned to Python aliases BoBa memory, so no array can dangle and
+writing to a returned core cannot corrupt the train. BoBa-owned memory remains the
+canonical representation, which leaves room for zero-copy views in a later release.
+
+### CPU-only for now
+
+The Python package computes on the host. This is a limitation of the bindings, not of
+BoBa: the C++ library's CUDA and HIP backends are unaffected and fully supported. GPU
+execution is simply not reachable from Python yet, and the Python API deliberately
+avoids baking the host execution space into its types so device support can be added
+without replacing it.
+
+### Running the Python tests
+
+```bash
+python -m pip install -e ".[test]"
+python -m pytest tests/python
+```
+
+`examples/tests/test_python_runtime_parity.cpp` is the matching C++ test. It checks that
+the runtime-dimensional implementation behind the bindings stays numerically faithful to
+BoBa's native, dimension-templated tensor train and `DMRGCross`.
 
 ## Tips and Tricks
 

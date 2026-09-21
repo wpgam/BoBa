@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyboba"
+version = "0.1.0"
+description = "Python interface to the BoBa performance-portable tensor decomposition library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0 WITH LLVM-exception" }
+dependencies = ["numpy>=1.22"]
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/llnl/BoBa"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.scikit-build]
+cmake.version = ">=3.21"
+cmake.source-dir = "."
+build-dir = "build/{build_type}-python"
+# Ship python/pyboba as the `pyboba` package; the compiled extension is installed into it
+# by python/CMakeLists.txt. Naming the source directory here is what lets an editable
+# install redirect to it instead of copying.
+wheel.packages = ["python/pyboba"]
+
+[tool.scikit-build.cmake.define]
+BOBA_BUILD_PYTHON = "ON"
+# The bindings only need the BOBA library target, so the example, test and tutorial
+# trees stay out of the wheel build.
+ENABLE_TESTS = "OFF"
+ENABLE_EXAMPLES = "OFF"
+ENABLE_TUTORIALS = "OFF"
+BOBA_ENABLE_TESTS = "OFF"
+BOBA_ENABLE_EXAMPLES = "OFF"
+BOBA_ENABLE_TUTORIALS = "OFF"
+# A minimal host build: Eigen supplies the linear algebra, and the optional TPLs are
+# left out unless the caller opts back in. Override any of these, or point EIGEN_DIR /
+# BLT_SOURCE_DIR elsewhere, with the CMAKE_ARGS environment variable.
+BOBA_ENABLE_UMPIRE = "OFF"
+BOBA_ENABLE_CAMP = "OFF"
+BOBA_ENABLE_RAJA = "OFF"
+BOBA_ENABLE_FMT = "OFF"
+# BoBa's CMakeLists turns ENABLE_OPENMP on by default, but AppleClang ships no OpenMP
+# runtime, so find_package(OpenMP) fails outright on macOS. The bindings do not rely on
+# OpenMP, so the wheel build keeps it off for portability. Re-enable with
+# CMAKE_ARGS="-DENABLE_OPENMP=ON" where a runtime is available.
+ENABLE_OPENMP = "OFF"
+# On macOS BoBa defaults BOBA_ENABLE_APPLE to On, which routes LU, QR, SVD and Cholesky
+# through <Accelerate/Accelerate.h> instead of Eigen. Apple deprecated the legacy LAPACK
+# entry points (dgetrf_ and friends) in macOS 13.3, so that path no longer builds cleanly.
+# The bindings are validated against the Eigen backend on every platform, so the wheel
+# keeps one backend everywhere rather than silently using untested kernels on macOS.
+# Re-enable with CMAKE_ARGS="-DBOBA_ENABLE_APPLE=On" once upstream moves to $NEWLAPACK.
+BOBA_ENABLE_APPLE = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
