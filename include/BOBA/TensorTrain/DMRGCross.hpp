@@ -635,8 +635,11 @@ struct DMRGCross
       ::boba::loop<space, 2>(unew.sizes(),
                              [=] __boba_host_device__(::boba::Array<index_t, 2> ij)
       {
-        norm_unew_view(ij[1]) += ::boba::pow(unew_view(ij), 2.0);
-        norm_uadd_view(ij[1]) += ::boba::pow(uadd_view(ij), 2.0);
+        // The exponent matches the base type: boba::pow overloads on (float, float)
+        // and (double, double), so a literal 2.0 makes the call ISO-ambiguous for
+        // data_t = float. No behavior change for data_t = double.
+        norm_unew_view(ij[1]) += ::boba::pow(unew_view(ij), data_t(2));
+        norm_uadd_view(ij[1]) += ::boba::pow(uadd_view(ij), data_t(2));
       });
 
       size_t columns_requiring_reorthogonalization = 0;
