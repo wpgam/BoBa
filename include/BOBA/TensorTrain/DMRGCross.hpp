@@ -747,7 +747,7 @@ struct DMRGCross
 
       auto [pivot_row, pivot_column] = a_in.multiindex(max_entry_index);
 
-      if (max_entry <= 1.0 + maxvol_tolerance)
+      if (max_entry <= real_data_t(1) + maxvol_tolerance)
       {
         ::boba::sort(selected_indices);
         return selected_indices;
