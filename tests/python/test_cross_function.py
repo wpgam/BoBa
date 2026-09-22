@@ -83,7 +83,9 @@ def test_an_entrywise_product_matches_the_exact_hadamard_product():
     approximated = pyboba.cross_function(
         lambda a, b: a * b, [t, u], initial_rank=4, tolerance=1e-12)
 
-    assert pyboba.relative_error(approximated, exact) < 1e-8
+    # 1e-6 rather than something tighter: relative_error cannot resolve below about
+    # sqrt(eps) regardless of how good the approximation is. See test_algebra.py.
+    assert pyboba.relative_error(approximated, exact) < 1e-6
 
 
 def test_relative_error_reports_the_quality_of_the_approximation():

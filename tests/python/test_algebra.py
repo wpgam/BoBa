@@ -189,7 +189,13 @@ def test_norm_is_the_square_root_of_the_self_inner_product():
 
 def test_relative_error_is_zero_against_itself():
     _, _, a, _ = operand_pair()
-    assert pyboba.relative_error(a, a) == pytest.approx(0.0, abs=1e-12)
+    # Not exactly zero, and not portably below it either. The difference is formed
+    # exactly, so a - a is a rank-2r train that cancels only in exact arithmetic; the
+    # floating-point residual of <d, d> is about eps * norm(a)**2, and the square root
+    # lifts it to sqrt(eps) * norm(a). That is the documented accuracy floor of
+    # relative_error, and how close to it a given platform lands depends on summation
+    # order in the underlying BLAS.
+    assert pyboba.relative_error(a, a) < 1e-6
 
 
 def test_relative_error_matches_the_dense_definition():
