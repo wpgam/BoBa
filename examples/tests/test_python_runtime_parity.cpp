@@ -667,6 +667,96 @@ bool check_structure_parity(::boba::Array<size_t, dimension> sizes, size_t mode)
   return check;
 }
 
+// ---------------------------------------------------------------------------
+// Cross over a pointwise function of existing trains
+// ---------------------------------------------------------------------------
+
+/*
+  The Python interface can cross-approximate f(A, B, ...) for trains that already exist.
+  The entry source behind that feature looks each input train up at the requested index
+  and then applies f; only the application of f involves Python, and this check exercises
+  everything else.
+
+  The target is chosen so the right answer is known in closed form: for f(x, y) = x * y
+  the result is the Hadamard product, which the exact arithmetic already computes. So the
+  cross approximation is compared against an independently computed exact train rather
+  than against a tolerance on itself. That also cross-checks the two features against each
+  other, since an error in either would break the agreement.
+*/
+template <size_t dimension>
+bool check_function_cross_parity(
+  ::boba::Array<size_t, dimension> sizes,
+  std::vector<size_t> internal_ranks)
+{
+  bool check = true;
+  std::cout << "\n=== Cross over a function of trains, dimension " << dimension
+            << " ===" << std::endl;
+
+  auto native_a = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return target_function<dimension>(index);
+  });
+  auto native_b = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return other_target_function<dimension>(index);
+  });
+
+  auto runtime_a = to_runtime<dimension>(native_a);
+  auto runtime_b = to_runtime<dimension>(native_b);
+
+  // The exact answer for an entrywise product.
+  auto exact = boba_python::hadamard(runtime_a, runtime_b);
+
+  // The entry source used by cross_function, with the Python callback replaced by the
+  // same arithmetic in C++.
+  auto evaluator = boba_python::make_native_evaluator<double>(
+    [&runtime_a, &runtime_b](const size_t* index, size_t ndim)
+  {
+    std::span<const size_t> multi(index, ndim);
+    return runtime_a.entry(multi) * runtime_b.entry(multi);
+  });
+
+  std::vector<size_t> shape(dimension);
+  for (size_t d = 0; d < dimension; d++)
+  {
+    shape[d] = sizes[d];
+  }
+
+  auto initial_guess = boba_python::make_random_initial_guess<double>(shape, internal_ranks);
+
+  CrossOptions options;
+  options.tolerance = 1.0e-12;
+  options.n_sweeps = 20;
+  options.kick_rank = 2;
+  options.selection = SubmatrixSelection::MAXVOL;
+
+  auto approximated = boba_python::runtime_dmrg_cross<double>(initial_guess, evaluator, options);
+
+  double worst = 0.0;
+  double scale = 0.0;
+  {
+    ::boba::Multiindexer<dimension> indexer(sizes);
+    std::vector<size_t> index(dimension);
+    for (size_t flat = 0; flat < indexer.size(); flat++)
+    {
+      auto multi = indexer.multiindex(flat);
+      for (size_t d = 0; d < dimension; d++)
+      {
+        index[d] = multi[d];
+      }
+      const double expected = exact.entry(index);
+      scale = ::boba::max(scale, ::boba::abs(expected));
+      worst = ::boba::max(worst, ::boba::abs(expected - approximated.entry(index)));
+    }
+  }
+
+  pass_or_fail(check, worst / ::boba::max(scale, 1.0), 1.0e-8);
+
+  return check;
+}
+
 int main(int argc, char* argv[])
 {
   boba::detail::ignore(argc);
@@ -708,10 +798,15 @@ int main(int argc, char* argv[])
   check = check_structure_parity<3>({5, 7, 4}, 1) && check;
   check = check_structure_parity<4>({3, 5, 4, 6}, 2) && check;
 
+  // Interior ranks stay within what each interface can attain for the given shape.
+  check = check_function_cross_parity<2>({5, 7}, {4}) && check;
+  check = check_function_cross_parity<3>({5, 7, 4}, {4, 4}) && check;
+  check = check_function_cross_parity<4>({3, 5, 4, 6}, {3, 4, 4}) && check;
+
   std::cout << "\n=== Summary ===" << std::endl;
   std::cout << "Runtime-dimensional compression, cross, orthogonalization, rounding and "
-               "exact arithmetic match native BoBa; concatenation and slicing "
-               "agree with independent native constructions" << std::endl;
+               "exact arithmetic match native BoBa; concatenation, slicing and "
+               "cross over functions of trains agree with independent constructions" << std::endl;
 
   boba::finalize();
   return final_check(check);

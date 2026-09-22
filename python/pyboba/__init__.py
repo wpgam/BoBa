@@ -21,6 +21,7 @@ from ._pyboba import (
     compress,
     concatenate,
     cross,
+    cross_function,
     from_cores,
     relative_error,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "compress",
     "concatenate",
     "cross",
+    "cross_function",
     "from_cores",
     "relative_error",
 ]

@@ -74,6 +74,53 @@ protected:
     throw PythonCallbackError{};
   }
 
+  /**
+   * \brief Validates a batched callback result and copies it into \p values.
+   *
+   * Shared by every evaluator whose callback returns one value per requested entry.
+   * \p description names the callback in any error message, so each caller keeps its
+   * own wording.
+   *
+   * \pre The GIL is held.
+   */
+  void store_batch_result(
+    py::object const& result,
+    std::size_t batch_count,
+    data_t* values,
+    char const* description)
+  {
+    py::array result_array = py::array::ensure(result);
+    if (!result_array)
+    {
+      this->abort_with_new(
+        PyExc_TypeError,
+        std::string(description) + " must return an array-like of values");
+    }
+
+    const char result_kind = result_array.dtype().kind();
+    if (result_kind != 'f' && result_kind != 'i' && result_kind != 'u' && result_kind != 'b')
+    {
+      this->abort_with_new(
+        PyExc_TypeError,
+        std::string(description) + " returned a non-real dtype; "
+        "only real floating and integer results are supported");
+    }
+
+    if (static_cast<std::size_t>(result_array.size()) != batch_count)
+    {
+      this->abort_with_new(
+        PyExc_ValueError,
+        std::string(description) + " returned " +
+          std::to_string(static_cast<long long>(result_array.size())) +
+          " values but " + std::to_string(static_cast<long long>(batch_count)) +
+          " were requested; expected shape (" +
+          std::to_string(static_cast<long long>(batch_count)) + ",)");
+    }
+
+    py::array_t<data_t, py::array::c_style | py::array::forcecast> values_array(result_array);
+    std::memcpy(values, values_array.data(), batch_count * sizeof(data_t));
+  }
+
 private:
   std::optional<py::error_already_set> m_error;
 };
@@ -196,37 +243,7 @@ public:
       }
 
       py::object result = m_function(index_array);
-
-      py::array result_array = py::array::ensure(result);
-      if (!result_array)
-      {
-        this->abort_with_new(
-          PyExc_TypeError,
-          "vectorized cross callback must return an array-like of values");
-      }
-
-      const char result_kind = result_array.dtype().kind();
-      if (result_kind != 'f' && result_kind != 'i' && result_kind != 'u' && result_kind != 'b')
-      {
-        this->abort_with_new(
-          PyExc_TypeError,
-          "vectorized cross callback returned a non-real dtype; "
-          "only real floating and integer results are supported");
-      }
-
-      if (static_cast<std::size_t>(result_array.size()) != batch_count)
-      {
-        this->abort_with_new(
-          PyExc_ValueError,
-          "vectorized cross callback returned " +
-            std::to_string(static_cast<long long>(result_array.size())) +
-            " values but " + std::to_string(static_cast<long long>(batch_count)) +
-            " were requested; expected shape (" +
-            std::to_string(static_cast<long long>(batch_count)) + ",)");
-      }
-
-      py::array_t<data_t, py::array::c_style | py::array::forcecast> values_array(result_array);
-      std::memcpy(values, values_array.data(), batch_count * sizeof(data_t));
+      this->store_batch_result(result, batch_count, values, "vectorized cross callback");
     }
     catch (py::error_already_set& error)
     {

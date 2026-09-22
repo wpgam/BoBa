@@ -7,6 +7,7 @@
 #include "detail/python_evaluator.hpp"
 #include "detail/runtime_cross.hpp"
 #include "detail/runtime_tensor_train.hpp"
+#include "detail/tensor_train_evaluator.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -259,6 +260,157 @@ PyTensorTrain cross(
   return cross_typed<double>(shape, internal_ranks, function, vectorized, options);
 }
 
+/**
+ * \brief Runs cross on a pointwise function of existing trains, for one scalar type.
+ */
+template <typename data_t>
+PyTensorTrain cross_function_typed(
+  std::vector<PyTensorTrain const*> const& trains,
+  std::vector<std::size_t> const& shape,
+  std::vector<std::size_t> const& internal_ranks,
+  py::object const& function,
+  CrossOptions const& options)
+{
+  std::vector<RuntimeTensorTrain<data_t> const*> inputs;
+  inputs.reserve(trains.size());
+  for (auto const* train : trains)
+  {
+    inputs.push_back(&std::get<RuntimeTensorTrain<data_t>>(train->storage()));
+  }
+
+  auto evaluator =
+    std::make_unique<TensorTrainFunctionEvaluator<data_t>>(function, std::move(inputs));
+
+  RuntimeTensorTrain<data_t> result;
+
+  try
+  {
+    // As in cross(): the sweep is pure C++ and drops the GIL, and the evaluator
+    // reacquires it once per batch.
+    py::gil_scoped_release release;
+
+    if (shape.size() == 1)
+    {
+      result = cross_one_dimensional<data_t>(shape[0], *evaluator);
+    }
+    else
+    {
+      auto initial_guess = make_random_initial_guess<data_t>(shape, internal_ranks);
+      result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options);
+    }
+  }
+  catch (PythonCallbackError const&)
+  {
+    evaluator->rethrow_if_failed();
+    throw py::value_error("cross_function(): evaluator aborted without a Python exception");
+  }
+
+  return PyTensorTrain(std::move(result));
+}
+
+/// Collects the input trains, rejecting anything that cannot be combined entrywise.
+std::vector<PyTensorTrain const*> parse_input_trains(py::object const& trains_like)
+{
+  if (!py::isinstance<py::sequence>(trains_like) || py::isinstance<py::str>(trains_like))
+  {
+    throw py::type_error("cross_function() expects a sequence of TensorTrain objects");
+  }
+  auto sequence = py::reinterpret_borrow<py::sequence>(trains_like);
+
+  const std::size_t count = py::len(sequence);
+  if (count == 0)
+  {
+    throw py::value_error(
+      "cross_function() requires at least one input train; the shape and dtype of the "
+      "result are taken from them");
+  }
+
+  std::vector<PyTensorTrain const*> trains;
+  trains.reserve(count);
+
+  for (std::size_t i = 0; i < count; i++)
+  {
+    py::handle item = sequence[i];
+    if (!py::isinstance<PyTensorTrain>(item))
+    {
+      throw py::type_error(
+        "cross_function() expects TensorTrain objects; entry " + std::to_string(i) +
+        " is " + py::str(py::type::handle_of(item)).cast<std::string>());
+    }
+    trains.push_back(&item.cast<PyTensorTrain const&>());
+  }
+
+  for (std::size_t i = 1; i < count; i++)
+  {
+    if (trains[i]->scalar_kind() != trains[0]->scalar_kind())
+    {
+      throw py::type_error(
+        "cross_function() requires every train to have the same dtype; train 0 has " +
+        py::str(trains[0]->dtype()).cast<std::string>() + " and train " +
+        std::to_string(i) + " has " + py::str(trains[i]->dtype()).cast<std::string>());
+    }
+    if (!trains[0]->shape().equal(trains[i]->shape()))
+    {
+      throw py::value_error(
+        "cross_function() requires every train to have the same shape; train 0 has " +
+        py::str(trains[0]->shape()).cast<std::string>() + " and train " +
+        std::to_string(i) + " has " + py::str(trains[i]->shape()).cast<std::string>());
+    }
+  }
+
+  return trains;
+}
+
+PyTensorTrain cross_function(
+  py::object const& function,
+  py::object const& trains_like,
+  py::object const& initial_rank,
+  double tolerance,
+  std::size_t n_sweeps,
+  std::size_t kick_rank,
+  std::string const& selection,
+  bool verbose)
+{
+  if (!py::isinstance<py::function>(function) && !PyCallable_Check(function.ptr()))
+  {
+    throw py::type_error("cross_function() requires a callable function");
+  }
+
+  auto trains = parse_input_trains(trains_like);
+
+  auto shape_tuple = trains[0]->shape();
+  std::vector<std::size_t> shape(trains[0]->ndim());
+  for (std::size_t d = 0; d < shape.size(); d++)
+  {
+    shape[d] = shape_tuple[d].cast<std::size_t>();
+  }
+
+  auto internal_ranks = parse_initial_ranks(initial_rank, shape);
+
+  if (n_sweeps == 0)
+  {
+    throw py::value_error("n_sweeps must be at least 1");
+  }
+  if (!(tolerance > 0.0))
+  {
+    throw py::value_error("tolerance must be positive");
+  }
+
+  CrossOptions options;
+  options.tolerance = tolerance;
+  options.n_sweeps = n_sweeps;
+  options.kick_rank = kick_rank;
+  options.selection = parse_selection(selection);
+  options.verbose = verbose;
+
+  // The result takes its scalar type from the inputs; there is nothing to choose.
+  if (trains[0]->scalar_kind() == ScalarKind::Float32)
+  {
+    return cross_function_typed<float>(trains, shape, internal_ranks, function, options);
+  }
+  return cross_function_typed<double>(trains, shape, internal_ranks, function, options);
+}
+
 } // namespace
 
 void register_cross(py::module_& module)
@@ -327,6 +479,79 @@ two-site sweep itself requires at least two cores.
 
 Exceptions raised inside ``function`` propagate unchanged to the caller and abort the
 sweep cleanly.
+)doc");
+
+  module.def(
+    "cross_function",
+    &cross_function,
+    py::arg("function"),
+    py::arg("trains"),
+    py::kw_only(),
+    py::arg("initial_rank") = 2,
+    py::arg("tolerance") = 1.0e-7,
+    py::arg("n_sweeps") = 10,
+    py::arg("kick_rank") = 2,
+    py::arg("selection") = "maxvol",
+    py::arg("verbose") = false,
+    R"doc(
+Cross-approximate a pointwise function of existing tensor trains.
+
+Approximates the tensor whose entry at ``index`` is
+``function(trains[0][index], trains[1][index], ...)``, using the same DMRG cross sweep as
+:func:`pyboba.cross`. Nothing is reconstructed densely: the sweep samples entries only at
+the indices it selects, and each sample is a contraction of the selected core slices.
+
+This is the operation to reach for when a function of a train has no exact TT form. Sums,
+differences and elementwise products do have one, available as ``+``, ``-`` and ``*``;
+``exp``, ``log``, ``1/x``, thresholds and anything else nonlinear do not, and cross
+approximation is how they are obtained.
+
+The callback is evaluated in batches, not entry by entry. It receives one
+one-dimensional NumPy array per input train, all of the same length, and returns one
+value per entry::
+
+    inverse = pyboba.cross_function(lambda a: 1.0 / a, [t], initial_rank=4)
+    ratio = pyboba.cross_function(lambda a, b: a / b, [t, u], initial_rank=4)
+
+Writing the callback with NumPy operations therefore costs one Python call per batch of
+up to a million entries, rather than one call per entry.
+
+Parameters
+----------
+function : callable
+    Called as ``function(values_0, values_1, ...)``, one array per input train. Must
+    return an array-like of real values, one per input element. The arrays it receives
+    are copies and may be modified freely.
+trains : sequence of TensorTrain
+    Input trains. They must all share a shape and a dtype, which become the shape and
+    dtype of the result. At least one is required, since there is nothing else to take
+    the shape from.
+initial_rank : int or sequence of int, optional
+    Starting interior ranks for the sweep, as in :func:`pyboba.cross`. Defaults to 2.
+tolerance : float, optional
+    Convergence tolerance for the sweep. Defaults to ``1e-7``.
+n_sweeps : int, optional
+    Maximum number of sweeps. Defaults to 10.
+kick_rank : int, optional
+    Rank enrichment added per sweep. Defaults to 2.
+selection : {"maxvol", "deim"}, optional
+    Submatrix selection strategy. Defaults to ``"maxvol"``.
+verbose : bool, optional
+    Print sweep diagnostics. Defaults to False.
+
+Returns
+-------
+TensorTrain
+    An approximation, with the shape and dtype of the inputs.
+
+Notes
+-----
+The result is an approximation even when ``function`` is exact on every sampled entry,
+because cross approximation rebuilds the tensor from a subset of entries. Check it with
+:func:`pyboba.relative_error` against something you trust, and raise ``initial_rank`` if
+the accuracy falls short.
+
+Exceptions raised inside ``function`` propagate unchanged and abort the sweep cleanly.
 )doc");
 }
 
