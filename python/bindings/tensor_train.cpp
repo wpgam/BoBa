@@ -4,12 +4,16 @@
 
 #include "detail/errors.hpp"
 #include "detail/numpy_interop.hpp"
+#include "detail/runtime_rounding.hpp"
 
 #include <pybind11/numpy.h>
 
+#include <algorithm>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace boba_python
 {
@@ -82,6 +86,68 @@ std::size_t parse_index(py::handle item, std::size_t axis, std::size_t extent)
       std::to_string(axis) + " with size " + std::to_string(extent));
   }
   return index;
+}
+
+/**
+ * \brief Expands the `max_rank` argument into one bound per interface.
+ *
+ * The result is indexed the way `boba::TensorTrain::max_ranks` is: entry `d` bounds the
+ * interface between cores `d - 1` and `d`. That gives `ndim + 1` entries, lining up
+ * element for element with `TensorTrain.ranks`, which is the sequence a user reads to
+ * decide on bounds in the first place.
+ */
+std::vector<std::size_t> parse_max_ranks(py::object const& max_rank_object, std::size_t ndim)
+{
+  std::vector<std::size_t> bounds(ndim + 1, std::numeric_limits<std::size_t>::max());
+
+  if (max_rank_object.is_none())
+  {
+    return bounds;
+  }
+
+  if (PyIndex_Check(max_rank_object.ptr()))
+  {
+    const long long requested = max_rank_object.cast<long long>();
+    if (requested <= 0)
+    {
+      throw py::value_error("max_rank must be a positive integer, a sequence, or None");
+    }
+    std::fill(bounds.begin(), bounds.end(), static_cast<std::size_t>(requested));
+    return bounds;
+  }
+
+  if (!py::isinstance<py::sequence>(max_rank_object) || py::isinstance<py::str>(max_rank_object))
+  {
+    throw py::type_error(
+      "max_rank must be a positive integer, a sequence of them, or None");
+  }
+  auto sequence = py::reinterpret_borrow<py::sequence>(max_rank_object);
+
+  if (py::len(sequence) != ndim + 1)
+  {
+    throw py::value_error(
+      "a sequence max_rank must have ndim + 1 = " + std::to_string(ndim + 1) +
+      " entries, matching TensorTrain.ranks; got " + std::to_string(py::len(sequence)));
+  }
+
+  for (std::size_t d = 0; d <= ndim; d++)
+  {
+    py::handle item = sequence[d];
+    if (!PyIndex_Check(item.ptr()))
+    {
+      throw py::type_error("max_rank entries must be integers");
+    }
+    const long long requested = item.cast<long long>();
+    if (requested <= 0)
+    {
+      throw py::value_error(
+        "max_rank entries must be positive; got " + std::to_string(requested) +
+        " at position " + std::to_string(d));
+    }
+    bounds[d] = static_cast<std::size_t>(requested);
+  }
+
+  return bounds;
 }
 
 } // namespace
@@ -262,6 +328,47 @@ py::object PyTensorTrain::getitem(py::object const& key) const
                     m_storage);
 }
 
+PyTensorTrain PyTensorTrain::orthogonalized() const
+{
+  return PyTensorTrain(std::visit([](auto const& train) -> storage_type
+  {
+    // Trains are immutable from Python, so the sweep runs on a deep copy. BoBa's Tensor
+    // copy constructor allocates and copies, so no core is shared with the original.
+    auto working_copy = train;
+    {
+      py::gil_scoped_release release;
+      orthogonalize(working_copy);
+    }
+    return storage_type(std::move(working_copy));
+  },
+                                  m_storage));
+}
+
+PyTensorTrain PyTensorTrain::rounded(
+  double relative_tolerance,
+  double absolute_tolerance,
+  py::object const& max_rank_object) const
+{
+  if (relative_tolerance < 0.0 || absolute_tolerance < 0.0)
+  {
+    throw py::value_error("rtol and atol must be non-negative");
+  }
+
+  auto bounds = parse_max_ranks(max_rank_object, ndim());
+
+  return PyTensorTrain(std::visit(
+    [relative_tolerance, absolute_tolerance, &bounds](auto const& train) -> storage_type
+  {
+    auto working_copy = train;
+    {
+      py::gil_scoped_release release;
+      round(working_copy, relative_tolerance, absolute_tolerance, bounds);
+    }
+    return storage_type(std::move(working_copy));
+  },
+    m_storage));
+}
+
 std::string PyTensorTrain::repr() const
 {
   auto extents = std::visit([](auto const& train)
@@ -311,6 +418,56 @@ train's rank or shape invariants.
     .def("__getitem__", &PyTensorTrain::getitem,
          "Evaluate a single entry from a complete zero-based multi-index.\n\n"
          "Contracts only the selected core slices; the dense tensor is never formed.")
+    .def("orthogonalize", &PyTensorTrain::orthogonalized,
+         R"doc(
+Return a left-orthogonalized copy of this train.
+
+Runs BoBa's left-to-right QR sweep, after which every core but the last is
+left-orthogonal. The represented tensor is unchanged up to floating-point roundoff, and
+so are the ranks; only the way the tensor is factored changes.
+
+Returns
+-------
+TensorTrain
+    A new train. This object is not modified.
+)doc")
+    .def("round", &PyTensorTrain::rounded,
+         py::kw_only(),
+         py::arg("rtol") = 1.0e-12,
+         py::arg("atol") = 1.0e-12,
+         py::arg("max_rank") = py::none(),
+         R"doc(
+Return a recompressed copy of this train with truncated interface ranks.
+
+Runs BoBa's rounding: a left-to-right QR sweep followed by a right-to-left truncated SVD
+sweep. This is the operation that undoes the rank growth of exact arithmetic -- addition
+and Hadamard products enlarge ranks without adding information, and rounding removes the
+excess at a controlled accuracy. The dense tensor is never formed.
+
+Parameters
+----------
+rtol : float, optional
+    Relative singular-value threshold, mapped to BoBa's ``svd_tolerance_relative``.
+    Defaults to the native ``1e-12``.
+atol : float, optional
+    Absolute singular-value threshold, mapped to BoBa's ``svd_tolerance_absolute``.
+    Defaults to the native ``1e-12``.
+max_rank : int, sequence of int, or None, optional
+    Upper bound on the retained interface ranks. An integer bounds every interface. A
+    sequence must have ``ndim + 1`` entries, matching the layout of
+    :attr:`TensorTrain.ranks`; its two boundary entries are ignored, since boundary
+    ranks are always 1. ``None`` (the default) applies no rank bound, leaving ``rtol``
+    and ``atol`` in control.
+
+Returns
+-------
+TensorTrain
+    A new train. This object is not modified.
+
+Notes
+-----
+A one-mode train has no interface to truncate and is returned unchanged.
+)doc")
     .def("__len__", [](PyTensorTrain const& train)
     {
       return train.shape()[0].cast<std::size_t>();

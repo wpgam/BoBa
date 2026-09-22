@@ -63,6 +63,15 @@ public:
   [[nodiscard]] py::object getitem(py::object const& key) const;
   [[nodiscard]] std::string repr() const;
 
+  /// Left-orthogonalized copy; see `detail/runtime_rounding.hpp`.
+  [[nodiscard]] PyTensorTrain orthogonalized() const;
+
+  /// Rounded copy. `max_rank_object` is None, an int, or one bound per interface.
+  [[nodiscard]] PyTensorTrain rounded(
+    double relative_tolerance,
+    double absolute_tolerance,
+    py::object const& max_rank_object) const;
+
   [[nodiscard]] storage_type const& storage() const noexcept
   {
     return m_storage;
@@ -87,6 +96,7 @@ private:
 [[nodiscard]] std::vector<std::size_t> parse_shape(py::handle shape_like);
 
 void register_tensor_train(py::module_& module);
+void register_construct(py::module_& module);
 void register_compress(py::module_& module);
 void register_cross(py::module_& module);
 

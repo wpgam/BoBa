@@ -21,6 +21,7 @@
 
 #include "../../python/bindings/detail/native_evaluator.hpp"
 #include "../../python/bindings/detail/runtime_cross.cpp"
+#include "../../python/bindings/detail/runtime_rounding.cpp"
 #include "../../python/bindings/detail/runtime_tensor_train.cpp"
 
 constexpr boba::execution_space host_space = ::boba::host_space;
@@ -269,6 +270,143 @@ bool check_cross_parity(
   return check;
 }
 
+// ---------------------------------------------------------------------------
+// Rounding parity
+// ---------------------------------------------------------------------------
+
+/*
+  Builds a train with deliberately redundant ranks by adding a compressed train to a
+  copy of itself. TT addition is exact and concatenates ranks, so the result represents
+  2*T at double the ranks -- exactly the situation rounding exists to clean up, and the
+  situation every later exact-arithmetic operation will produce.
+*/
+template <size_t dimension>
+::boba::TensorTrain<dimension, host_space, double> make_rank_inflated_train(
+  ::boba::Array<size_t, dimension> sizes)
+{
+  ::boba::Tensor<dimension, host_space, double> dense(sizes);
+  {
+    auto dense_view = dense.view();
+    ::boba::loop<host_space, 1>(dense_view.size(), [=] __boba_host_device__(size_t flat)
+    {
+      dense_view(flat) = target_function<dimension>(dense_view.multiindex(flat));
+    });
+  }
+
+  ::boba::TensorTrain<dimension, host_space, double> train(sizes);
+  train.svd_tolerance_relative = 1.0e-12;
+  train.svd_tolerance_absolute = 1.0e-12;
+  train.compress(dense);
+
+  ::boba::TensorTrain<dimension, host_space, double> addend(train);
+  train += addend;
+  return train;
+}
+
+/// Largest entrywise difference between a native train's cores and a runtime train's.
+template <size_t dimension>
+double worst_core_difference(
+  ::boba::TensorTrain<dimension, host_space, double> const& native,
+  RuntimeTensorTrain<double> const& runtime)
+{
+  double worst = 0.0;
+  for (size_t d = 0; d < dimension; d++)
+  {
+    auto const& native_core = native.cores[d];
+    auto const& runtime_core = runtime.core(d);
+    if (native_core.sizes() != runtime_core.sizes())
+    {
+      return ::boba::highest_value<double>();
+    }
+    for (size_t flat = 0; flat < native_core.size(); flat++)
+    {
+      worst = ::boba::max(
+        worst,
+        ::boba::abs(native_core.const_data()[flat] - runtime_core.const_data()[flat]));
+    }
+  }
+  return worst;
+}
+
+/*
+  The QR sweep is deterministic, so native orthogonalize and the runtime adaptation
+  should agree core by core, not merely represent the same tensor.
+*/
+template <size_t dimension>
+bool check_orthogonalization_parity(::boba::Array<size_t, dimension> sizes)
+{
+  bool check = true;
+  std::cout << "\n=== Orthogonalization parity, dimension " << dimension << " ===" << std::endl;
+
+  auto native = make_rank_inflated_train<dimension>(sizes);
+  auto runtime = to_runtime<dimension>(native);
+
+  native.orthogonalize();
+  boba_python::orthogonalize(runtime);
+
+  pass_or_fail(check, worst_core_difference<dimension>(native, runtime), 1.0e-10);
+  return check;
+}
+
+/*
+  Rounding is a QR sweep followed by a truncated SVD sweep, both deterministic. Starting
+  from the same rank-inflated train, the two implementations should produce the same
+  ranks and the same cores.
+*/
+template <size_t dimension>
+bool check_rounding_parity(::boba::Array<size_t, dimension> sizes, size_t max_rank)
+{
+  bool check = true;
+  std::cout << "\n=== Rounding parity, dimension " << dimension << ", max_rank "
+            << max_rank << " ===" << std::endl;
+
+  auto native = make_rank_inflated_train<dimension>(sizes);
+  auto runtime = to_runtime<dimension>(native);
+
+  const double tolerance = 1.0e-12;
+
+  native.svd_tolerance_relative = tolerance;
+  native.svd_tolerance_absolute = tolerance;
+  native.max_ranks = ::boba::filled_array<dimension + 1>(max_rank);
+  native.round();
+
+  std::vector<size_t> bounds(dimension + 1, max_rank);
+  boba_python::round(runtime, tolerance, tolerance, bounds);
+
+  auto native_ranks = native.ranks();
+  auto runtime_ranks = runtime.ranks();
+
+  bool ranks_match = (runtime_ranks.size() == dimension + 1);
+  for (size_t d = 0; ranks_match && d < dimension + 1; d++)
+  {
+    ranks_match = ranks_match && (native_ranks[d] == runtime_ranks[d]);
+  }
+  pass_or_fail_bool(check, ranks_match);
+
+  pass_or_fail(check, worst_core_difference<dimension>(native, runtime), 1.0e-10);
+
+  // The rounded train still represents 2 * target, so check the values it stands for as
+  // well as the factorization it stores.
+  double worst_value = 0.0;
+  {
+    ::boba::Multiindexer<dimension> indexer(sizes);
+    std::vector<size_t> index(dimension);
+    for (size_t flat = 0; flat < indexer.size(); flat++)
+    {
+      auto multi = indexer.multiindex(flat);
+      for (size_t d = 0; d < dimension; d++)
+      {
+        index[d] = multi[d];
+      }
+      const double expected = 2.0 * target_function<dimension>(multi);
+      worst_value = ::boba::max(worst_value, ::boba::abs(runtime.entry(index) - expected));
+    }
+  }
+  pass_or_fail(check, worst_value, 1.0e-9);
+
+  return check;
+}
+
 int main(int argc, char* argv[])
 {
   boba::detail::ignore(argc);
@@ -291,8 +429,19 @@ int main(int argc, char* argv[])
   check = check_cross_parity<4>({4, 5, 3, 6}, 2, SubmatrixSelection::MAXVOL) && check;
   check = check_cross_parity<3>({5, 7, 4}, 2, SubmatrixSelection::DEIM) && check;
 
+  check = check_orthogonalization_parity<2>({5, 7}) && check;
+  check = check_orthogonalization_parity<3>({5, 7, 4}) && check;
+  check = check_orthogonalization_parity<4>({3, 5, 4, 6}) && check;
+
+  // Unbounded, so only the tolerance truncates; then a hard rank cap on the same input.
+  check = check_rounding_parity<2>({5, 7}, ::boba::highest_value<size_t>()) && check;
+  check = check_rounding_parity<3>({5, 7, 4}, ::boba::highest_value<size_t>()) && check;
+  check = check_rounding_parity<4>({3, 5, 4, 6}, ::boba::highest_value<size_t>()) && check;
+  check = check_rounding_parity<3>({5, 7, 4}, 2) && check;
+
   std::cout << "\n=== Summary ===" << std::endl;
-  std::cout << "Runtime-dimensional compression and cross match native BoBa" << std::endl;
+  std::cout << "Runtime-dimensional compression, cross, orthogonalization and rounding "
+               "match native BoBa" << std::endl;
 
   boba::finalize();
   return final_check(check);

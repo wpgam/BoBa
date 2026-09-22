@@ -16,12 +16,13 @@ Notes
 * Indices are zero-based and non-negative.
 """
 
-from ._pyboba import TensorTrain, compress, cross
+from ._pyboba import TensorTrain, compress, cross, from_cores
 
 __all__ = [
     "TensorTrain",
     "compress",
     "cross",
+    "from_cores",
 ]
 
 __version__ = "0.1.0"
