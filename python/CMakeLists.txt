@@ -11,11 +11,13 @@ set(boba_python_sources
     bindings/tensor_train.cpp
     bindings/construct.cpp
     bindings/algebra.cpp
+    bindings/structure.cpp
     bindings/compress.cpp
     bindings/cross.cpp
     bindings/detail/runtime_tensor_train.cpp
     bindings/detail/runtime_rounding.cpp
     bindings/detail/runtime_algebra.cpp
+    bindings/detail/runtime_structure.cpp
     bindings/detail/runtime_cross.cpp)
 
 pybind11_add_module(_pyboba MODULE ${boba_python_sources})

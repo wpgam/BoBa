@@ -82,9 +82,18 @@ def test_index_negative_is_rejected_clearly(small_train):
         small_train[-1, 0, 0]
 
 
-def test_index_slice_is_rejected(small_train):
-    with pytest.raises(TypeError, match="slicing is not supported"):
-        small_train[0:2, 0, 0]
+def test_index_slice_returns_a_subtrain(small_train):
+    """Slicing used to be rejected; it now selects a subtrain. See test_structure.py."""
+    sliced = small_train[0:2, 0, 0]
+
+    assert isinstance(sliced, pyboba.TensorTrain)
+    assert sliced.shape == (2,)
+
+
+def test_index_negative_is_still_rejected_inside_a_slice_key(small_train):
+    """A bare negative index stays an error even when other axes are sliced."""
+    with pytest.raises(IndexError, match="non-negative"):
+        small_train[-1, :, 0]
 
 
 def test_index_non_integer_is_rejected(small_train):

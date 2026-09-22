@@ -99,6 +99,7 @@ private:
 py::class_<PyTensorTrain> register_tensor_train(py::module_& module);
 void register_construct(py::module_& module);
 void register_algebra(py::class_<PyTensorTrain>& tensor_train_class, py::module_& module);
+void register_structure(py::module_& module);
 void register_compress(py::module_& module);
 void register_cross(py::module_& module);
 

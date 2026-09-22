@@ -22,6 +22,7 @@
 #include "../../python/bindings/detail/native_evaluator.hpp"
 #include "../../python/bindings/detail/runtime_algebra.cpp"
 #include "../../python/bindings/detail/runtime_cross.cpp"
+#include "../../python/bindings/detail/runtime_structure.cpp"
 #include "../../python/bindings/detail/runtime_rounding.cpp"
 #include "../../python/bindings/detail/runtime_tensor_train.cpp"
 
@@ -524,6 +525,148 @@ bool check_algebra_parity(::boba::Array<size_t, dimension> sizes)
   return check;
 }
 
+// ---------------------------------------------------------------------------
+// Structural parity
+// ---------------------------------------------------------------------------
+
+/*
+  Concatenation and slicing have no native counterpart to compare against core for core,
+  so they are checked against independent native constructions instead.
+
+  For concatenation the reference is built the way BoBa itself would express a join: a
+  zero train of the enlarged shape, with each operand added into a disjoint mode range by
+  add_subtrain. That produces the same tensor by a different route, through BoBa's own
+  subtrain arithmetic. It is not how concatenate_mode is implemented, and deliberately
+  so: seeding from a rank-one zero train leaves one spurious rank behind, which is the
+  reason the runtime version builds the cores directly. The check therefore compares
+  values, and separately asserts that the runtime ranks are exactly the sums of the
+  operands ranks, with no spurious extra.
+
+  For slicing the reference is the native entry evaluator at shifted indices, since
+  BoBa cannot extract a dense subtensor at all: unroll_subtensor forwards to
+  partial_decompress_core, which asserts on any partial range (issue 238).
+*/
+template <size_t dimension>
+bool check_structure_parity(::boba::Array<size_t, dimension> sizes, size_t mode)
+{
+  bool check = true;
+  std::cout << "\n=== Structural parity, dimension " << dimension << ", mode " << mode
+            << " ===" << std::endl;
+
+  auto native_a = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return target_function<dimension>(index);
+  });
+  auto native_b = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return other_target_function<dimension>(index);
+  });
+
+  auto runtime_a = to_runtime<dimension>(native_a);
+  auto runtime_b = to_runtime<dimension>(native_b);
+
+  // ---- concatenation ----
+  {
+    ::boba::Array<size_t, dimension> enlarged_sizes = sizes;
+    enlarged_sizes[mode] = sizes[mode] * 2;
+
+    ::boba::TensorTrain<dimension, host_space, double> native_joined(enlarged_sizes);
+    native_joined.fill_with_zeros();
+
+    auto offsets = ::boba::filled_array<dimension>(static_cast<size_t>(0));
+    native_joined.add_subtrain(native_a, offsets);
+    offsets[mode] = sizes[mode];
+    native_joined.add_subtrain(native_b, offsets);
+
+    auto runtime_joined = boba_python::concatenate_mode(runtime_a, runtime_b, mode);
+
+    // Ranks must be exactly the sums, with no seed rank carried along.
+    auto a_ranks = native_a.ranks();
+    auto b_ranks = native_b.ranks();
+    auto joined_ranks = runtime_joined.ranks();
+
+    bool ranks_exact = (joined_ranks.size() == dimension + 1);
+    ranks_exact = ranks_exact && (joined_ranks.front() == 1) && (joined_ranks.back() == 1);
+    for (size_t d = 1; ranks_exact && d < dimension; d++)
+    {
+      ranks_exact = ranks_exact && (joined_ranks[d] == a_ranks[d] + b_ranks[d]);
+    }
+    pass_or_fail_bool(check, ranks_exact);
+
+    double worst_joined = 0.0;
+    {
+      ::boba::Multiindexer<dimension> indexer(enlarged_sizes);
+      std::vector<size_t> index(dimension);
+      for (size_t flat = 0; flat < indexer.size(); flat++)
+      {
+        auto multi = indexer.multiindex(flat);
+        for (size_t d = 0; d < dimension; d++)
+        {
+          index[d] = multi[d];
+        }
+        worst_joined = ::boba::max(
+          worst_joined,
+          ::boba::abs(native_joined.unroll_value(multi) - runtime_joined.entry(index)));
+      }
+    }
+    pass_or_fail(check, worst_joined, 1.0e-10);
+  }
+
+  // ---- slicing ----
+  {
+    // Drop the first index of the chosen mode, keep everything else whole.
+    std::vector<boba_python::ModeSelection> selections(dimension);
+    for (size_t d = 0; d < dimension; d++)
+    {
+      selections[d].drop = false;
+      selections[d].start = (d == mode) ? 1 : 0;
+      selections[d].step = 1;
+      selections[d].count = (d == mode) ? sizes[d] - 1 : sizes[d];
+    }
+
+    auto runtime_sliced = boba_python::slice_modes(runtime_a, selections);
+
+    // Restricting a mode cannot couple the factors, so the ranks must be untouched.
+    auto original_ranks = runtime_a.ranks();
+    auto sliced_ranks = runtime_sliced.ranks();
+    bool ranks_unchanged = (sliced_ranks.size() == original_ranks.size());
+    for (size_t d = 0; ranks_unchanged && d < sliced_ranks.size(); d++)
+    {
+      ranks_unchanged = ranks_unchanged && (sliced_ranks[d] == original_ranks[d]);
+    }
+    pass_or_fail_bool(check, ranks_unchanged);
+
+    ::boba::Array<size_t, dimension> sliced_sizes = sizes;
+    sliced_sizes[mode] = sizes[mode] - 1;
+
+    double worst_sliced = 0.0;
+    {
+      ::boba::Multiindexer<dimension> indexer(sliced_sizes);
+      std::vector<size_t> index(dimension);
+      for (size_t flat = 0; flat < indexer.size(); flat++)
+      {
+        auto multi = indexer.multiindex(flat);
+        for (size_t d = 0; d < dimension; d++)
+        {
+          index[d] = multi[d];
+        }
+
+        auto source = multi;
+        source[mode] = multi[mode] + 1;
+
+        worst_sliced = ::boba::max(
+          worst_sliced,
+          ::boba::abs(native_a.unroll_value(source) - runtime_sliced.entry(index)));
+      }
+    }
+    pass_or_fail(check, worst_sliced, 1.0e-10);
+  }
+
+  return check;
+}
+
 int main(int argc, char* argv[])
 {
   boba::detail::ignore(argc);
@@ -560,9 +703,15 @@ int main(int argc, char* argv[])
   check = check_algebra_parity<3>({5, 7, 4}) && check;
   check = check_algebra_parity<4>({3, 5, 4, 6}) && check;
 
+  check = check_structure_parity<2>({5, 7}, 0) && check;
+  check = check_structure_parity<2>({5, 7}, 1) && check;
+  check = check_structure_parity<3>({5, 7, 4}, 1) && check;
+  check = check_structure_parity<4>({3, 5, 4, 6}, 2) && check;
+
   std::cout << "\n=== Summary ===" << std::endl;
   std::cout << "Runtime-dimensional compression, cross, orthogonalization, rounding and "
-               "exact arithmetic match native BoBa" << std::endl;
+               "exact arithmetic match native BoBa; concatenation and slicing "
+               "agree with independent native constructions" << std::endl;
 
   boba::finalize();
   return final_check(check);

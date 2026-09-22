@@ -5,6 +5,7 @@
 #include "detail/errors.hpp"
 #include "detail/numpy_interop.hpp"
 #include "detail/runtime_rounding.hpp"
+#include "detail/runtime_structure.hpp"
 
 #include <pybind11/numpy.h>
 
@@ -55,12 +56,6 @@ py::tuple to_tuple(std::vector<std::size_t> const& values)
 /// Reads one index from a `__getitem__` key, rejecting slices and negatives.
 std::size_t parse_index(py::handle item, std::size_t axis, std::size_t extent)
 {
-  if (py::isinstance<py::slice>(item))
-  {
-    throw py::type_error("TensorTrain indexing requires a complete scalar multi-index; "
-                         "slicing is not supported");
-  }
-
   if (!py::isinstance<py::int_>(item))
   {
     // NumPy integer scalars expose __index__, so accept anything integral.
@@ -316,16 +311,80 @@ py::object PyTensorTrain::getitem(py::object const& key) const
   },
                             m_storage);
 
+  // A key made only of integers names a single entry, as it always has. Any slice in
+  // the key makes this a structural selection instead, returning a train.
+  bool selects_a_subtrain = false;
   for (std::size_t d = 0; d < dimension; d++)
   {
-    indices[d] = parse_index(index_tuple[d], d, extents[d]);
+    if (py::isinstance<py::slice>(index_tuple[d]))
+    {
+      selects_a_subtrain = true;
+      break;
+    }
   }
 
-  return std::visit([&indices](auto const& train) -> py::object
+  if (!selects_a_subtrain)
   {
-    return py::cast(train.entry(indices));
+    for (std::size_t d = 0; d < dimension; d++)
+    {
+      indices[d] = parse_index(index_tuple[d], d, extents[d]);
+    }
+
+    return std::visit([&indices](auto const& train) -> py::object
+    {
+      return py::cast(train.entry(indices));
+    },
+                      m_storage);
+  }
+
+  std::vector<ModeSelection> selections(dimension);
+  for (std::size_t d = 0; d < dimension; d++)
+  {
+    py::handle item = index_tuple[d];
+
+    if (!py::isinstance<py::slice>(item))
+    {
+      // An integer among slices fixes that mode, which removes it from the result, the
+      // way NumPy basic indexing does.
+      selections[d].drop = true;
+      selections[d].start = static_cast<std::ptrdiff_t>(parse_index(item, d, extents[d]));
+      selections[d].step = 1;
+      selections[d].count = 1;
+      continue;
+    }
+
+    // Let CPython resolve the slice, so negative bounds, clamping, omitted endpoints
+    // and negative steps behave exactly as they do for a NumPy array.
+    Py_ssize_t start = 0;
+    Py_ssize_t stop = 0;
+    Py_ssize_t step = 0;
+    Py_ssize_t length = 0;
+    if (PySlice_GetIndicesEx(
+          item.ptr(), static_cast<Py_ssize_t>(extents[d]), &start, &stop, &step, &length) != 0)
+    {
+      throw py::error_already_set();
+    }
+
+    if (length == 0)
+    {
+      throw py::value_error(
+        "the slice on axis " + std::to_string(d) +
+        " selects no indices; a tensor train cannot have a zero-extent mode");
+    }
+
+    selections[d].drop = false;
+    selections[d].start = static_cast<std::ptrdiff_t>(start);
+    selections[d].step = static_cast<std::ptrdiff_t>(step);
+    selections[d].count = static_cast<std::size_t>(length);
+  }
+
+  return py::cast(PyTensorTrain(std::visit([&selections](auto const& train) -> storage_type
+  {
+    // Slicing copies core sub-ranges and touches no Python state.
+    py::gil_scoped_release release;
+    return storage_type(slice_modes(train, selections));
   },
-                    m_storage);
+                                           m_storage)));
 }
 
 PyTensorTrain PyTensorTrain::orthogonalized() const
@@ -416,8 +475,23 @@ train's rank or shape invariants.
          "Reconstruct the dense tensor as a new NumPy array of shape ``shape``.\n\n"
          "Raises MemoryError when the dense size cannot be represented.")
     .def("__getitem__", &PyTensorTrain::getitem,
-         "Evaluate a single entry from a complete zero-based multi-index.\n\n"
-         "Contracts only the selected core slices; the dense tensor is never formed.")
+         R"doc(
+Select an entry or a subtrain from a complete key of length ``ndim``.
+
+A key of integers names one entry and returns a float, contracting only the selected
+core slices. A key containing any slice returns a new :class:`TensorTrain` restricted to
+the selected ranges, built by copying core sub-ranges: interface ranks are unchanged and
+the dense tensor is never formed. An integer alongside slices fixes that mode and removes
+it from the result, as NumPy basic indexing does.
+
+Slices follow ordinary Python rules, including negative bounds, omitted endpoints and
+negative steps. Bare integer indices remain zero-based and non-negative.
+
+Examples
+--------
+``t[2, 3, 1]`` is an entry, ``t[:, 2:7, :]`` is a train of shape ``(n0, 5, n2)``, and
+``t[:, 4, :]`` is a two-mode train.
+)doc")
     .def("orthogonalize", &PyTensorTrain::orthogonalized,
          R"doc(
 Return a left-orthogonalized copy of this train.
