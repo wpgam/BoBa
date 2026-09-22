@@ -95,8 +95,10 @@ private:
  */
 [[nodiscard]] std::vector<std::size_t> parse_shape(py::handle shape_like);
 
-void register_tensor_train(py::module_& module);
+/// Registers the TensorTrain type and returns it, so other units can add methods to it.
+py::class_<PyTensorTrain> register_tensor_train(py::module_& module);
 void register_construct(py::module_& module);
+void register_algebra(py::class_<PyTensorTrain>& tensor_train_class, py::module_& module);
 void register_compress(py::module_& module);
 void register_cross(py::module_& module);
 

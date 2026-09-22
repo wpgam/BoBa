@@ -43,6 +43,8 @@ class RuntimeTensorTrain
 {
 public:
   using core_type = ::boba::Tensor<3, python_space, data_t>;
+  /// Scalar type, recoverable from the class alone when dispatching over the dtype variant.
+  using value_type = data_t;
 
   RuntimeTensorTrain() = default;
 

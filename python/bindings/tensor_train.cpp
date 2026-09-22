@@ -388,13 +388,13 @@ std::string PyTensorTrain::repr() const
          format_tuple(interface_ranks) + ", dtype=" + dtype_name + ")";
 }
 
-void register_tensor_train(py::module_& module)
+py::class_<PyTensorTrain> register_tensor_train(py::module_& module)
 {
-  py::class_<PyTensorTrain>(module, "TensorTrain", R"doc(
+  auto tensor_train_class = py::class_<PyTensorTrain>(module, "TensorTrain", R"doc(
 A tensor train of arbitrary runtime dimension.
 
-Instances are produced by :func:`pyboba.compress` and :func:`pyboba.cross`; there is no
-public constructor in this first release.
+Instances are produced by :func:`pyboba.compress`, :func:`pyboba.cross` and
+:func:`pyboba.from_cores`; there is no public constructor.
 
 Storage is owned by BoBa. Every array handed back to Python -- ``cores`` and
 ``to_numpy()`` -- is a fresh copy, so nothing can dangle and Python cannot corrupt the
@@ -473,6 +473,8 @@ A one-mode train has no interface to truncate and is returned unchanged.
       return train.shape()[0].cast<std::size_t>();
     })
     .def("__repr__", &PyTensorTrain::repr);
+
+  return tensor_train_class;
 }
 
 } // namespace boba_python

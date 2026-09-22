@@ -47,8 +47,9 @@ PYBIND11_MODULE(_pyboba, module)
     }
   });
 
-  boba_python::register_tensor_train(module);
+  auto tensor_train_class = boba_python::register_tensor_train(module);
   boba_python::register_construct(module);
+  boba_python::register_algebra(tensor_train_class, module);
   boba_python::register_compress(module);
   boba_python::register_cross(module);
 }

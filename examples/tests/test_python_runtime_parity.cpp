@@ -20,6 +20,7 @@
 */
 
 #include "../../python/bindings/detail/native_evaluator.hpp"
+#include "../../python/bindings/detail/runtime_algebra.cpp"
 #include "../../python/bindings/detail/runtime_cross.cpp"
 #include "../../python/bindings/detail/runtime_rounding.cpp"
 #include "../../python/bindings/detail/runtime_tensor_train.cpp"
@@ -280,16 +281,17 @@ bool check_cross_parity(
   2*T at double the ranks -- exactly the situation rounding exists to clean up, and the
   situation every later exact-arithmetic operation will produce.
 */
-template <size_t dimension>
-::boba::TensorTrain<dimension, host_space, double> make_rank_inflated_train(
-  ::boba::Array<size_t, dimension> sizes)
+template <size_t dimension, typename function_t>
+::boba::TensorTrain<dimension, host_space, double> compress_native(
+  ::boba::Array<size_t, dimension> sizes,
+  function_t function)
 {
   ::boba::Tensor<dimension, host_space, double> dense(sizes);
   {
     auto dense_view = dense.view();
     ::boba::loop<host_space, 1>(dense_view.size(), [=] __boba_host_device__(size_t flat)
     {
-      dense_view(flat) = target_function<dimension>(dense_view.multiindex(flat));
+      dense_view(flat) = function(dense_view.multiindex(flat));
     });
   }
 
@@ -297,6 +299,18 @@ template <size_t dimension>
   train.svd_tolerance_relative = 1.0e-12;
   train.svd_tolerance_absolute = 1.0e-12;
   train.compress(dense);
+  return train;
+}
+
+template <size_t dimension>
+::boba::TensorTrain<dimension, host_space, double> make_rank_inflated_train(
+  ::boba::Array<size_t, dimension> sizes)
+{
+  auto train = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return target_function<dimension>(index);
+  });
 
   ::boba::TensorTrain<dimension, host_space, double> addend(train);
   train += addend;
@@ -407,6 +421,109 @@ bool check_rounding_parity(::boba::Array<size_t, dimension> sizes, size_t max_ra
   return check;
 }
 
+// ---------------------------------------------------------------------------
+// Exact arithmetic parity
+// ---------------------------------------------------------------------------
+
+/// A second low-rank target, independent of target_function, for two-operand checks.
+template <size_t dimension>
+double other_target_function(::boba::Array<size_t, dimension> index)
+{
+  double total = 1.0;
+  for (size_t d = 0; d < dimension; d++)
+  {
+    total *= (2.0 + static_cast<double>(index[d]) / (1.0 + static_cast<double>(d)));
+  }
+  return total;
+}
+
+/// Relative difference between two scalars, safe when the reference is zero.
+double relative_difference(double reference, double candidate)
+{
+  const double scale = ::boba::max(::boba::abs(reference), 1.0);
+  return ::boba::abs(reference - candidate) / scale;
+}
+
+/*
+  Exact TT addition and the Hadamard product are deterministic and involve no truncation,
+  so native BoBa and the runtime adaptation should produce identical cores, not merely
+  equivalent tensors. The scalar reductions are compared relatively.
+*/
+template <size_t dimension>
+bool check_algebra_parity(::boba::Array<size_t, dimension> sizes)
+{
+  bool check = true;
+  std::cout << "\n=== Exact arithmetic parity, dimension " << dimension << " ===" << std::endl;
+
+  auto native_a = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return target_function<dimension>(index);
+  });
+  auto native_b = compress_native<dimension>(sizes, [] __boba_host_device__(
+    ::boba::Array<size_t, dimension> index)
+  {
+    return other_target_function<dimension>(index);
+  });
+
+  auto runtime_a = to_runtime<dimension>(native_a);
+  auto runtime_b = to_runtime<dimension>(native_b);
+
+  // Addition: ranks concatenate, so the result ranks must match as well as the cores.
+  {
+    auto native_sum = native_a + native_b;
+    auto runtime_sum = boba_python::add(runtime_a, runtime_b);
+
+    auto native_ranks = native_sum.ranks();
+    auto runtime_ranks = runtime_sum.ranks();
+    bool ranks_match = (runtime_ranks.size() == dimension + 1);
+    for (size_t d = 0; ranks_match && d < dimension + 1; d++)
+    {
+      ranks_match = ranks_match && (native_ranks[d] == runtime_ranks[d]);
+    }
+    pass_or_fail_bool(check, ranks_match);
+    pass_or_fail(check, worst_core_difference<dimension>(native_sum, runtime_sum), 1.0e-12);
+  }
+
+  // Hadamard product: ranks multiply.
+  {
+    auto native_product = ::boba::elementwise_product(native_a, native_b);
+    auto runtime_product = boba_python::hadamard(runtime_a, runtime_b);
+
+    auto native_ranks = native_product.ranks();
+    auto runtime_ranks = runtime_product.ranks();
+    bool ranks_match = (runtime_ranks.size() == dimension + 1);
+    for (size_t d = 0; ranks_match && d < dimension + 1; d++)
+    {
+      ranks_match = ranks_match && (native_ranks[d] == runtime_ranks[d]);
+    }
+    pass_or_fail_bool(check, ranks_match);
+    pass_or_fail(
+      check, worst_core_difference<dimension>(native_product, runtime_product), 1.0e-12);
+  }
+
+  // Scalar multiplication is absorbed into the first core by both implementations.
+  {
+    auto native_scaled = native_a * (-2.5);
+    auto runtime_scaled = boba_python::scale(runtime_a, -2.5);
+    pass_or_fail(
+      check, worst_core_difference<dimension>(native_scaled, runtime_scaled), 1.0e-12);
+  }
+
+  // Reductions.
+  {
+    const double native_inner = native_a.inner_product(native_b);
+    const double runtime_inner = boba_python::inner_product(runtime_a, runtime_b);
+    pass_or_fail(check, relative_difference(native_inner, runtime_inner), 1.0e-12);
+
+    const double native_norm = ::boba::norm_frobenius(native_a);
+    const double runtime_norm = boba_python::norm_frobenius(runtime_a);
+    pass_or_fail(check, relative_difference(native_norm, runtime_norm), 1.0e-12);
+  }
+
+  return check;
+}
+
 int main(int argc, char* argv[])
 {
   boba::detail::ignore(argc);
@@ -439,9 +556,13 @@ int main(int argc, char* argv[])
   check = check_rounding_parity<4>({3, 5, 4, 6}, ::boba::highest_value<size_t>()) && check;
   check = check_rounding_parity<3>({5, 7, 4}, 2) && check;
 
+  check = check_algebra_parity<2>({5, 7}) && check;
+  check = check_algebra_parity<3>({5, 7, 4}) && check;
+  check = check_algebra_parity<4>({3, 5, 4, 6}) && check;
+
   std::cout << "\n=== Summary ===" << std::endl;
-  std::cout << "Runtime-dimensional compression, cross, orthogonalization and rounding "
-               "match native BoBa" << std::endl;
+  std::cout << "Runtime-dimensional compression, cross, orthogonalization, rounding and "
+               "exact arithmetic match native BoBa" << std::endl;
 
   boba::finalize();
   return final_check(check);
