@@ -296,6 +296,10 @@ BoBa's native `DMRGCross`:
 `n_sweeps=N` performs at most `N - 1` full sweeps. `pyboba.seed(value)` seeds the random
 starting guess and enrichment so runs are reproducible.
 
+Native work runs with the GIL released, so independent calls can run concurrently with
+`pyboba.parallel.map`; see [HPC.md](HPC.md) for threading, reproducible seeding and
+cluster job scripts.
+
 ### Tensor train API
 
 | Member | Meaning |
