@@ -56,7 +56,8 @@ PYBIND11_MODULE(_pyboba, module)
 
   module.def("seed", [](std::uint32_t value) { ::boba::seed_random(value); },
              py::arg("value"),
-             R"doc(Seed the generator behind every random fill (cross starting guesses and
-rank enrichment), so later results are reproducible. Unseeded, it is seeded from
-std::random_device on first use.)doc");
+             R"doc(Seed the calling thread's generator behind every random fill (cross starting
+guesses and rank enrichment), so later results on this thread are reproducible. Each
+thread has its own generator, seeded from std::random_device on first use. For
+concurrent calls, pass ``seed=`` to :func:`cross` / :func:`cross_function` instead.)doc");
 }

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "evaluator.hpp"
@@ -62,6 +63,9 @@ struct CrossOptions
   /// than this fraction (the error has stalled at the level the two-site SVD tolerance allows).
   /// 0 disables the stall test.
   double val_stall = 0.1;
+  /// If set, reseeds the calling thread's generator before the random starting guess, so the
+  /// result depends only on this seed, not on earlier random fills or on other threads.
+  std::optional<std::uint32_t> seed;
 };
 
 /// What a cross run reports back (filled when a pointer is passed).

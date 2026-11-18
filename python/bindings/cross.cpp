@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -188,7 +189,26 @@ double parse_svd_tolerance(py::object const& value, double tolerance)
 }
 
 /// Info of the most recent cross() / cross_function() call, returned by last_cross_info().
-CrossInfo g_last_cross_info;
+std::optional<std::uint32_t> parse_seed(py::object const& value)
+{
+  if (value.is_none())
+  {
+    return std::nullopt;
+  }
+  if (!py::isinstance<py::int_>(value) || py::isinstance<py::bool_>(value))
+  {
+    throw py::type_error("seed must be an int or None");
+  }
+  const auto v = value.cast<long long>();
+  if (v < 0 || v > static_cast<long long>(UINT32_MAX))
+  {
+    throw py::value_error("seed must be in [0, 2**32 - 1]");
+  }
+  return static_cast<std::uint32_t>(v);
+}
+
+// Per thread, so concurrent cross calls from a thread pool do not race on it.
+thread_local CrossInfo g_last_cross_info;
 
 template <typename data_t>
 PyTensorTrain cross_typed(
@@ -225,6 +245,10 @@ PyTensorTrain cross_typed(
     }
     else
     {
+      if (options.seed)
+      {
+        ::boba::seed_random(*options.seed);
+      }
       auto initial_guess = make_random_initial_guess<data_t>(shape, internal_ranks);
       g_last_cross_info = CrossInfo{};
       result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options, &g_last_cross_info);
@@ -255,7 +279,8 @@ PyTensorTrain cross(
   std::size_t max_rank,
   std::size_t val_size,
   std::uint64_t val_seed,
-  double val_stall)
+  double val_stall,
+  py::object const& seed)
 {
   auto shape = parse_shape(shape_like);
 
@@ -286,6 +311,7 @@ PyTensorTrain cross(
   options.val_size = val_size;
   options.val_seed = val_seed;
   options.val_stall = val_stall;
+  options.seed = parse_seed(seed);
 
   // dtype defaults to float64 because cross has no input array to infer from.
   const ScalarKind kind =
@@ -334,6 +360,10 @@ PyTensorTrain cross_function_typed(
     }
     else
     {
+      if (options.seed)
+      {
+        ::boba::seed_random(*options.seed);
+      }
       auto initial_guess = make_random_initial_guess<data_t>(shape, internal_ranks);
       g_last_cross_info = CrossInfo{};
       result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options, &g_last_cross_info);
@@ -414,7 +444,8 @@ PyTensorTrain cross_function(
   std::size_t max_rank,
   std::size_t val_size,
   std::uint64_t val_seed,
-  double val_stall)
+  double val_stall,
+  py::object const& seed)
 {
   if (!py::isinstance<py::function>(function) && !PyCallable_Check(function.ptr()))
   {
@@ -452,6 +483,7 @@ PyTensorTrain cross_function(
   options.val_size = val_size;
   options.val_seed = val_seed;
   options.val_stall = val_stall;
+  options.seed = parse_seed(seed);
 
   // The result takes its scalar type from the inputs; there is nothing to choose.
   if (trains[0]->scalar_kind() == ScalarKind::Float32)
@@ -484,6 +516,7 @@ void register_cross(py::module_& module)
     py::arg("val_size") = 0,
     py::arg("val_seed") = 1234,
     py::arg("val_stall") = 0.1,
+    py::arg("seed") = py::none(),
     R"doc(
 Approximate a callable tensor with DMRG cross approximation.
 
@@ -538,6 +571,10 @@ val_seed : int, optional
 val_stall : float, optional
     With ``val_size > 0``, also stop once a sweep improves the validation error by less
     than this fraction (default 0.1). ``0`` disables it.
+seed : int, optional
+    Seed for this call's random starting guess and rank enrichment. The result then
+    depends only on ``seed``, also when calls run concurrently in threads. ``None``
+    (default) continues the calling thread's generator (see :func:`seed`).
 
 Returns
 -------
@@ -569,6 +606,7 @@ sweep cleanly.
     py::arg("val_size") = 0,
     py::arg("val_seed") = 1234,
     py::arg("val_stall") = 0.1,
+    py::arg("seed") = py::none(),
     R"doc(
 Cross-approximate a pointwise function of existing tensor trains.
 
@@ -628,6 +666,10 @@ val_seed : int, optional
 val_stall : float, optional
     With ``val_size > 0``, also stop once a sweep improves the validation error by less
     than this fraction (default 0.1). ``0`` disables it.
+seed : int, optional
+    Seed for this call's random starting guess and rank enrichment. The result then
+    depends only on ``seed``, also when calls run concurrently in threads. ``None``
+    (default) continues the calling thread's generator (see :func:`seed`).
 
 Returns
 -------
@@ -661,7 +703,8 @@ Exceptions raised inside ``function`` propagate unchanged and abort the sweep cl
       return d;
     },
     R"doc(
-Diagnostics of the most recent :func:`cross` or :func:`cross_function` call.
+Diagnostics of the most recent :func:`cross` or :func:`cross_function` call on the
+calling thread.
 
 Returns a dict with ``val_history`` (relative L2 error on the validation set after each full
 sweep; empty unless ``val_size > 0``), ``final_error`` (the last of those, or the native

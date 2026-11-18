@@ -14,14 +14,15 @@ namespace boba
 {
 
 /**
- * \brief Process-wide generator behind Tensor::fill_with_random().
+ * \brief Per-thread generator behind Tensor::fill_with_random().
  *
  * Seeded from std::random_device on first use, so unseeded programs behave as before.
- * Call seed_random() to make every later random fill reproducible.
+ * seed_random() reseeds only the calling thread's generator, which makes its later random
+ * fills reproducible however many other threads are filling concurrently.
  */
 inline std::mt19937& random_generator()
 {
-  static std::mt19937 generator(std::random_device{}());
+  thread_local std::mt19937 generator(std::random_device{}());
   return generator;
 }
 
