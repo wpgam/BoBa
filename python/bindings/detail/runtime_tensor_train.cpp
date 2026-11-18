@@ -183,8 +183,7 @@ RuntimeTensorTrain<data_t> make_random_initial_guess(
     const std::size_t right_rank = (d + 1 == ndim) ? 1 : internal_ranks[d];
 
     cores[d] = core_type({left_rank, shape[d], right_rank});
-    // BoBa seeds fill_with_random() from std::random_device; no seed hook is exposed
-    // and this code deliberately does not introduce one.
+    // Drawn from boba::random_generator(); pyboba.seed() makes it reproducible.
     cores[d].fill_with_random();
   }
 

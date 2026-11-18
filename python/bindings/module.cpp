@@ -53,4 +53,10 @@ PYBIND11_MODULE(_pyboba, module)
   boba_python::register_structure(module);
   boba_python::register_compress(module);
   boba_python::register_cross(module);
+
+  module.def("seed", [](std::uint32_t value) { ::boba::seed_random(value); },
+             py::arg("value"),
+             R"doc(Seed the generator behind every random fill (cross starting guesses and
+rank enrichment), so later results are reproducible. Unseeded, it is seeded from
+std::random_device on first use.)doc");
 }

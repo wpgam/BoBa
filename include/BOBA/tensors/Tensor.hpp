@@ -5,12 +5,30 @@
 #include "BOBA/boba.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 
 namespace boba
 {
+
+/**
+ * \brief Process-wide generator behind Tensor::fill_with_random().
+ *
+ * Seeded from std::random_device on first use, so unseeded programs behave as before.
+ * Call seed_random() to make every later random fill reproducible.
+ */
+inline std::mt19937& random_generator()
+{
+  static std::mt19937 generator(std::random_device{}());
+  return generator;
+}
+
+inline void seed_random(std::uint32_t seed)
+{
+  random_generator().seed(seed);
+}
 
 /**
  * \brief
@@ -734,9 +752,7 @@ struct Tensor
     {
       if constexpr (std::is_same_v<data_t, size_t> or std::is_same_v<data_t, int>)
       {
-        // Seed and construct random number generator
-        std::random_device rd;
-        std::mt19937 gen(rd());
+        auto& gen = random_generator();
         auto M = min(sizes());
         // Define distribution that generates integers in [lower_value, upper_value]
         std::uniform_int_distribution<data_t> distrib(lower_value, upper_value);
@@ -748,9 +764,7 @@ struct Tensor
       }
       else if constexpr (std::is_same_v<data_t, double> or std::is_same_v<data_t, float>)
       {
-        // Seed and construct random number generator
-        std::random_device rd;
-        std::mt19937 gen(rd());
+        auto& gen = random_generator();
         // Define distribution from (0.0, 1.0)
         std::uniform_real_distribution<data_t> distrib(lower_value, upper_value);
         // Write to data

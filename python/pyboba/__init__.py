@@ -24,6 +24,7 @@ from ._pyboba import (
     cross_function,
     from_cores,
     relative_error,
+    seed,
 )
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "cross_function",
     "from_cores",
     "relative_error",
+    "seed",
 ]
 
 __version__ = "0.1.0"
