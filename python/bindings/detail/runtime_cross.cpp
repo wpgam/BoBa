@@ -376,13 +376,17 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     {
       // Leave room for the kick-rank enrichment so the enriched rank stays <= max_rank.
       svd.max_kept_singular_values =
-        options.max_rank > native_cross.kickrank ? options.max_rank - native_cross.kickrank : 1;
+        options.max_rank > native_cross.kickrank ? options.max_rank - native_cross.kickrank
+                                                 : options.max_rank;
     }
     svd(score);
     auto u = svd.U;
     auto s = svd.S;
     auto v = svd.V;
     auto r = svd.significant_singular_values;
+    const std::size_t kick_columns = options.max_rank > 0
+      ? std::min<std::size_t>(native_cross.kickrank, options.max_rank > r ? options.max_rank - r : 0)
+      : native_cross.kickrank;
 
     // for compatibility with tt-toolbox
     u *= -1.0;
@@ -393,10 +397,10 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     {
       ::boba::apply_as_diagonal_right_in_place(s, v);
 
-      matrix_t<data_t> ur({u.rows(), native_cross.kickrank});
+      matrix_t<data_t> ur({u.rows(), kick_columns});
       ur.fill_with_zeros();
 
-      matrix_t<data_t> random_enrichment({u.rows(), native_cross.kickrank});
+      matrix_t<data_t> random_enrichment({u.rows(), kick_columns});
       random_enrichment.fill_with_random();
       ur.reshape(random_enrichment);
 
@@ -415,10 +419,10 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     {
       ::boba::apply_as_diagonal_right_in_place(s, u);
 
-      matrix_t<data_t> vr({v.rows(), native_cross.kickrank});
+      matrix_t<data_t> vr({v.rows(), kick_columns});
       vr.fill_with_zeros();
 
-      matrix_t<data_t> random_enrichment({v.rows(), native_cross.kickrank});
+      matrix_t<data_t> random_enrichment({v.rows(), kick_columns});
       random_enrichment.fill_with_random();
 
       vr.reshape(random_enrichment);
