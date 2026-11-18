@@ -278,6 +278,24 @@ sweep cleanly.
 map onto BoBa's existing MAXVOL and DEIM implementations. Any other value raises
 `ValueError`.
 
+### Sweep controls and diagnostics
+
+`cross` and `cross_function` accept optional sweep controls; their defaults reproduce
+BoBa's native `DMRGCross`:
+
+| Keyword | Default | Meaning |
+| --- | --- | --- |
+| `svd_tolerance` | `0` | Two-site SVD tolerance; `0` keeps the native 1e-7, `'auto'` uses `tolerance / 10` |
+| `max_rank` | `0` | Hard cap on every interface rank, including kick-rank enrichment; `0` is uncapped |
+| `val_size` | `0` | Size of a random validation set; `> 0` stops once its relative L2 error is below `tolerance` |
+| `val_seed` | `1234` | Seed of the validation set |
+| `val_stall` | `0.1` | With a validation set, also stop once a sweep improves the error by less than this fraction |
+
+`pyboba.last_cross_info()` returns a dict describing the most recent call: `val_history`,
+`final_error`, `sweeps`, `n_evals` and `converged`. As in native `DMRGCross`,
+`n_sweeps=N` performs at most `N - 1` full sweeps. `pyboba.seed(value)` seeds the random
+starting guess and enrichment so runs are reproducible.
+
 ### Tensor train API
 
 | Member | Meaning |
