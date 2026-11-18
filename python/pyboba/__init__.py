@@ -14,6 +14,8 @@ Notes
 * Arrays exchanged with NumPy are copied in both directions, so returned arrays are
   always independent of BoBa-owned storage.
 * Indices are zero-based and non-negative.
+* Native work runs with the GIL released, so independent calls can overlap in threads;
+  see :mod:`pyboba.parallel`.
 """
 
 from ._pyboba import (
@@ -39,5 +41,7 @@ __all__ = [
     "relative_error",
     "seed",
 ]
+
+from . import parallel  # noqa: E402
 
 __version__ = "0.1.0"
