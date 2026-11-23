@@ -3,6 +3,7 @@
 #include "py_tensor_train.hpp"
 
 #include "detail/errors.hpp"
+#include "detail/random.hpp"
 
 #include "BOBA/boba.hpp"
 
@@ -53,4 +54,11 @@ PYBIND11_MODULE(_pyboba, module)
   boba_python::register_structure(module);
   boba_python::register_compress(module);
   boba_python::register_cross(module);
+
+  module.def("seed", [](std::uint32_t value) { boba_python::thread_random_context().set_seed(value); },
+             py::arg("value"),
+             R"doc(Seed the calling thread's generator behind every random fill (cross starting
+guesses and rank enrichment), so later results on this thread are reproducible. Each
+thread has its own generator, seeded from std::random_device on first use. For
+concurrent calls, pass ``seed=`` to :func:`cross` / :func:`cross_function` instead.)doc");
 }

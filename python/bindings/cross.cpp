@@ -6,11 +6,14 @@
 #include "detail/numpy_interop.hpp"
 #include "detail/python_evaluator.hpp"
 #include "detail/runtime_cross.hpp"
+#include "detail/random.hpp"
 #include "detail/runtime_tensor_train.hpp"
 #include "detail/tensor_train_evaluator.hpp"
 
 #include <algorithm>
 #include <memory>
+#include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -166,6 +169,48 @@ RuntimeTensorTrain<data_t> cross_one_dimensional(
   return RuntimeTensorTrain<data_t>(std::move(cores));
 }
 
+/// svd_tolerance: a float (0 = the native fixed 1e-7) or "auto" (tolerance / 10, which removes
+/// the intermediate rank overshoot at the accuracy of `tolerance`; pyboba_performance.md).
+double parse_svd_tolerance(py::object const& value, double tolerance)
+{
+  if (py::isinstance<py::str>(value))
+  {
+    if (value.cast<std::string>() == "auto")
+    {
+      return tolerance / 10.0;
+    }
+    throw py::value_error("svd_tolerance must be a float or 'auto'");
+  }
+  const double v = value.cast<double>();
+  if (v < 0.0)
+  {
+    throw py::value_error("svd_tolerance must be non-negative");
+  }
+  return v;
+}
+
+/// Info of the most recent cross() / cross_function() call, returned by last_cross_info().
+std::optional<std::uint32_t> parse_seed(py::object const& value)
+{
+  if (value.is_none())
+  {
+    return std::nullopt;
+  }
+  if (!py::isinstance<py::int_>(value) || py::isinstance<py::bool_>(value))
+  {
+    throw py::type_error("seed must be an int or None");
+  }
+  const auto v = value.cast<long long>();
+  if (v < 0 || v > static_cast<long long>(UINT32_MAX))
+  {
+    throw py::value_error("seed must be in [0, 2**32 - 1]");
+  }
+  return static_cast<std::uint32_t>(v);
+}
+
+// Per thread, so concurrent cross calls from a thread pool do not race on it.
+thread_local CrossInfo g_last_cross_info;
+
 template <typename data_t>
 PyTensorTrain cross_typed(
   std::vector<std::size_t> const& shape,
@@ -195,12 +240,19 @@ PyTensorTrain cross_typed(
 
     if (shape.size() == 1)
     {
+      g_last_cross_info = CrossInfo{};
+      g_last_cross_info.converged = true;  // a 1-D fibre is sampled exactly
       result = cross_one_dimensional<data_t>(shape[0], *evaluator);
     }
     else
     {
+      if (options.seed)
+      {
+        thread_random_context().set_seed(*options.seed);
+      }
       auto initial_guess = make_random_initial_guess<data_t>(shape, internal_ranks);
-      result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options);
+      g_last_cross_info = CrossInfo{};
+      result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options, &g_last_cross_info);
     }
   }
   catch (PythonCallbackError const&)
@@ -223,7 +275,13 @@ PyTensorTrain cross(
   std::string const& selection,
   bool vectorized,
   py::object const& dtype_like,
-  bool verbose)
+  bool verbose,
+  py::object const& svd_tolerance,
+  std::size_t max_rank,
+  std::size_t val_size,
+  std::uint64_t val_seed,
+  double val_stall,
+  py::object const& seed)
 {
   auto shape = parse_shape(shape_like);
 
@@ -249,6 +307,12 @@ PyTensorTrain cross(
   options.kick_rank = kick_rank;
   options.selection = parse_selection(selection);
   options.verbose = verbose;
+  options.svd_tolerance = parse_svd_tolerance(svd_tolerance, tolerance);
+  options.max_rank = max_rank;
+  options.val_size = val_size;
+  options.val_seed = val_seed;
+  options.val_stall = val_stall;
+  options.seed = parse_seed(seed);
 
   // dtype defaults to float64 because cross has no input array to infer from.
   const ScalarKind kind =
@@ -291,12 +355,19 @@ PyTensorTrain cross_function_typed(
 
     if (shape.size() == 1)
     {
+      g_last_cross_info = CrossInfo{};
+      g_last_cross_info.converged = true;  // a 1-D fibre is sampled exactly
       result = cross_one_dimensional<data_t>(shape[0], *evaluator);
     }
     else
     {
+      if (options.seed)
+      {
+        thread_random_context().set_seed(*options.seed);
+      }
       auto initial_guess = make_random_initial_guess<data_t>(shape, internal_ranks);
-      result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options);
+      g_last_cross_info = CrossInfo{};
+      result = runtime_dmrg_cross<data_t>(initial_guess, *evaluator, options, &g_last_cross_info);
     }
   }
   catch (PythonCallbackError const&)
@@ -369,7 +440,13 @@ PyTensorTrain cross_function(
   std::size_t n_sweeps,
   std::size_t kick_rank,
   std::string const& selection,
-  bool verbose)
+  bool verbose,
+  py::object const& svd_tolerance,
+  std::size_t max_rank,
+  std::size_t val_size,
+  std::uint64_t val_seed,
+  double val_stall,
+  py::object const& seed)
 {
   if (!py::isinstance<py::function>(function) && !PyCallable_Check(function.ptr()))
   {
@@ -402,6 +479,12 @@ PyTensorTrain cross_function(
   options.kick_rank = kick_rank;
   options.selection = parse_selection(selection);
   options.verbose = verbose;
+  options.svd_tolerance = parse_svd_tolerance(svd_tolerance, tolerance);
+  options.max_rank = max_rank;
+  options.val_size = val_size;
+  options.val_seed = val_seed;
+  options.val_stall = val_stall;
+  options.seed = parse_seed(seed);
 
   // The result takes its scalar type from the inputs; there is nothing to choose.
   if (trains[0]->scalar_kind() == ScalarKind::Float32)
@@ -429,6 +512,12 @@ void register_cross(py::module_& module)
     py::arg("vectorized") = false,
     py::arg("dtype") = py::dtype::of<double>(),
     py::arg("verbose") = false,
+    py::arg("svd_tolerance") = 0.0,
+    py::arg("max_rank") = 0,
+    py::arg("val_size") = 0,
+    py::arg("val_seed") = 1234,
+    py::arg("val_stall") = 0.1,
+    py::arg("seed") = py::none(),
     R"doc(
 Approximate a callable tensor with DMRG cross approximation.
 
@@ -467,6 +556,26 @@ dtype : numpy dtype, optional
     ``float32`` or ``float64``. Defaults to ``float64``.
 verbose : bool, optional
     Forwarded to ``DMRGCross::verbose``; prints per-step diagnostics to stdout.
+svd_tolerance : float or 'auto', optional
+    Relative truncation tolerance of each two-site SVD inside the sweep. ``0`` (default)
+    keeps the native fixed 1e-7, independent of ``tolerance``. Setting it to about
+    ``tolerance`` stops the intermediate rank from overshooting what the result needs.
+max_rank : int, optional
+    Cap on every interface rank inside the sweep, including kick-rank enrichment.
+    ``0`` (default) is uncapped.
+val_size : int, optional
+    Size of a fixed random validation set. ``> 0``: after every full sweep the relative L2
+    error of the current train on it is computed and the sweep stops once it is below
+    ``tolerance`` (see :func:`last_cross_info`). ``0`` (default) keeps the native test.
+val_seed : int, optional
+    Seed of the validation set.
+val_stall : float, optional
+    With ``val_size > 0``, also stop once a sweep improves the validation error by less
+    than this fraction (default 0.1). ``0`` disables it.
+seed : int, optional
+    Seed for this call's random starting guess and rank enrichment. The result then
+    depends only on ``seed``, also when calls run concurrently in threads. ``None``
+    (default) continues the calling thread's generator (see :func:`seed`).
 
 Returns
 -------
@@ -493,6 +602,12 @@ sweep cleanly.
     py::arg("kick_rank") = 2,
     py::arg("selection") = "maxvol",
     py::arg("verbose") = false,
+    py::arg("svd_tolerance") = 0.0,
+    py::arg("max_rank") = 0,
+    py::arg("val_size") = 0,
+    py::arg("val_seed") = 1234,
+    py::arg("val_stall") = 0.1,
+    py::arg("seed") = py::none(),
     R"doc(
 Cross-approximate a pointwise function of existing tensor trains.
 
@@ -538,6 +653,24 @@ selection : {"maxvol", "deim"}, optional
     Submatrix selection strategy. Defaults to ``"maxvol"``.
 verbose : bool, optional
     Print sweep diagnostics. Defaults to False.
+svd_tolerance : float or 'auto', optional
+    Relative truncation tolerance of each two-site SVD inside the sweep. ``0`` (default)
+    keeps the native fixed 1e-7, independent of ``tolerance``; ``'auto'`` uses ``tolerance / 10``.
+max_rank : int, optional
+    Cap on every interface rank inside the sweep. ``0`` (default) is uncapped.
+val_size : int, optional
+    Size of a fixed random validation set. ``> 0``: after every full sweep the relative L2
+    error of the current train on it is computed and the sweep stops once it is below
+    ``tolerance`` (see :func:`last_cross_info`). ``0`` (default) keeps the native test.
+val_seed : int, optional
+    Seed of the validation set.
+val_stall : float, optional
+    With ``val_size > 0``, also stop once a sweep improves the validation error by less
+    than this fraction (default 0.1). ``0`` disables it.
+seed : int, optional
+    Seed for this call's random starting guess and rank enrichment. The result then
+    depends only on ``seed``, also when calls run concurrently in threads. ``None``
+    (default) continues the calling thread's generator (see :func:`seed`).
 
 Returns
 -------
@@ -552,6 +685,32 @@ because cross approximation rebuilds the tensor from a subset of entries. Check 
 the accuracy falls short.
 
 Exceptions raised inside ``function`` propagate unchanged and abort the sweep cleanly.
+)doc");
+
+  module.def(
+    "last_cross_info",
+    []() {
+      py::dict d;
+      py::list history;
+      for (double v : g_last_cross_info.val_history)
+      {
+        history.append(v);
+      }
+      d["val_history"] = history;
+      d["final_error"] = g_last_cross_info.final_error;
+      d["sweeps"] = g_last_cross_info.sweeps;
+      d["n_evals"] = g_last_cross_info.n_evals;
+      d["converged"] = g_last_cross_info.converged;
+      return d;
+    },
+    R"doc(
+Diagnostics of the most recent :func:`cross` or :func:`cross_function` call on the
+calling thread.
+
+Returns a dict with ``val_history`` (relative L2 error on the validation set after each full
+sweep; empty unless ``val_size > 0``), ``final_error`` (the last of those, or the native
+local error when ``val_size = 0``), ``sweeps``, ``n_evals`` (entries requested, including the
+validation set) and ``converged`` (whether the stopping test was met within ``n_sweeps``).
 )doc");
 }
 

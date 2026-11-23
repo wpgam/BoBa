@@ -3,6 +3,7 @@
 #include "runtime_tensor_train.hpp"
 
 #include "errors.hpp"
+#include "random.hpp"
 
 #include <cstring>
 #include <limits>
@@ -183,9 +184,8 @@ RuntimeTensorTrain<data_t> make_random_initial_guess(
     const std::size_t right_rank = (d + 1 == ndim) ? 1 : internal_ranks[d];
 
     cores[d] = core_type({left_rank, shape[d], right_rank});
-    // BoBa seeds fill_with_random() from std::random_device; no seed hook is exposed
-    // and this code deliberately does not introduce one.
-    cores[d].fill_with_random();
+    // pyboba.seed() makes the per-thread context, and so this guess, reproducible.
+    cores[d].fill_with_random(thread_random_context());
   }
 
   return RuntimeTensorTrain<data_t>(std::move(cores));

@@ -445,7 +445,7 @@ struct DMRGCross
           {
             index_t value = 0;
 
-            if (core_id == previous_indices_view.sizes(1))
+            if (k == core_id)
             {
               value = mode_index;
             }

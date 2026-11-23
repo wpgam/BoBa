@@ -3,8 +3,12 @@
 #include "runtime_cross.hpp"
 
 #include "errors.hpp"
+#include "random.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <random>
+#include <span>
 #include <vector>
 
 namespace boba_python
@@ -56,6 +60,35 @@ void fill_score_tensor(
     return;
   }
 
+  // Structured path: hand the evaluator the shared left/right index sets so it can
+  // contract them once per tuple instead of once per entry.
+  {
+    const std::size_t r_left = score_tensor_view.sizes(0);
+    const std::size_t n_k = score_tensor_view.sizes(1);
+    const std::size_t n_k1 = score_tensor_view.sizes(2);
+    const std::size_t r_right = score_tensor_view.sizes(3);
+    const std::size_t k = left_index_count;
+    const std::size_t nr = right_indices_view.sizes(0);
+    std::vector<std::size_t> left_buf(r_left * k);
+    for (std::size_t m = 0; m < k; m++)
+      for (std::size_t s1 = 0; s1 < r_left; s1++)
+        left_buf[s1 + r_left * m] = static_cast<std::size_t>(left_indices_view({s1, m}));
+    std::vector<std::size_t> right_buf(nr * r_right);
+    for (std::size_t s2 = 0; s2 < r_right; s2++)
+      for (std::size_t m = 0; m < nr; m++)
+        right_buf[m + nr * s2] = static_cast<std::size_t>(right_indices_view({m, s2}));
+    std::vector<data_t> block(entry_count);
+    if (evaluator.evaluate_block(left_buf.data(), r_left, k, n_k, n_k1,
+                                 right_buf.data(), r_right, dimension, block.data()))
+    {
+      for (std::size_t e = 0; e < entry_count; e++)
+      {
+        score_tensor_view(e) = block[e];
+      }
+      return;
+    }
+  }
+
   const std::size_t batch_cap = std::max<std::size_t>(evaluator.preferred_batch_size(), 1);
   const std::size_t chunk = std::min(batch_cap, entry_count);
 
@@ -98,7 +131,8 @@ template <typename data_t>
 RuntimeTensorTrain<data_t> runtime_dmrg_cross(
   RuntimeTensorTrain<data_t> const& initial_guess,
   Evaluator<data_t>& evaluator,
-  CrossOptions const& options)
+  CrossOptions const& options,
+  CrossInfo* info)
 {
   using native_cross_t = ::boba::DMRGCross<data_t>;
 
@@ -124,6 +158,51 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
   auto mode_sizes = approximated_tt.shape();
   auto tt_ranks = approximated_tt.ranks();
   std::size_t sweep_count = 1;
+
+  // Validation set: val_size distinct-ish uniform random multi-indices, evaluated once
+  // through the same batched evaluator. After every full sweep the relative L2 error of the
+  // current train on it is the stopping test (the native test compares each two-site block
+  // only with the previous sweep's approximation, which measures change, not error).
+  const std::size_t val_size = options.val_size;
+  std::vector<std::size_t> val_indices(val_size * dimension);
+  std::vector<data_t> val_values(val_size);
+  double val_norm = 0.0;
+  if (val_size > 0)
+  {
+    std::mt19937_64 rng(options.val_seed);
+    for (std::size_t s = 0; s < val_size; s++)
+      for (std::size_t d = 0; d < dimension; d++)
+        val_indices[s * dimension + d] =
+          std::uniform_int_distribution<std::size_t>(0, mode_sizes[d] - 1)(rng);
+    const std::size_t chunk = std::max<std::size_t>(evaluator.preferred_batch_size(), 1);
+    for (std::size_t base = 0; base < val_size; base += chunk)
+    {
+      const std::size_t count = std::min(chunk, val_size - base);
+      evaluator.evaluate(val_indices.data() + base * dimension, count, dimension,
+                         val_values.data() + base);
+    }
+    for (std::size_t s = 0; s < val_size; s++)
+      val_norm += static_cast<double>(val_values[s]) * static_cast<double>(val_values[s]);
+    val_norm = std::sqrt(val_norm);
+    if (val_norm == 0.0)
+      val_norm = 1.0e-300;
+    if (info)
+      info->n_evals += val_size;
+  }
+  CrossInfo local_info;
+  if (!info)
+    info = &local_info;
+  auto validation_error = [&]() {
+    double diff = 0.0;
+    for (std::size_t s = 0; s < val_size; s++)
+    {
+      const double e = static_cast<double>(approximated_tt.entry(std::span<const std::size_t>(
+                         val_indices.data() + s * dimension, dimension))) -
+                       static_cast<double>(val_values[s]);
+      diff += e * e;
+    }
+    return std::sqrt(diff) / val_norm;
+  };
 
   // Native: boba::Array<Matrix, dimension + 1>.
   std::vector<matrix_t<data_t>> transfer_matrices(dimension + 1);
@@ -265,6 +344,8 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
       {tt_ranks[core_id], mode_sizes[core_id], mode_sizes[core_id + 1], tt_ranks[core_id + 2]});
 
     fill_score_tensor(left_indices, right_indices, score_tensor, dimension, evaluator);
+    if (info)
+      info->n_evals += score_tensor.size();
 
     matrix_t<data_t> score(
       {tt_ranks[core_id], mode_sizes[core_id] * mode_sizes[core_id + 1] * tt_ranks[core_id + 2]});
@@ -288,13 +369,25 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     // Mirrors native DMRGCross: the two-site block SVD carries its own thresholds,
     // deliberately independent of the top-level convergence tolerance. Reading them
     // from the native object keeps this in step with any future default change.
-    svd.tolerance_relative = native_cross.two_site_svd_tolerance_relative;
+    svd.tolerance_relative = options.svd_tolerance > 0.0
+      ? static_cast<typename native_cross_t::real_data_t>(options.svd_tolerance)
+      : native_cross.two_site_svd_tolerance_relative;
     svd.tolerance_absolute = native_cross.two_site_svd_tolerance_absolute;
+    if (options.max_rank > 0)
+    {
+      // Leave room for the kick-rank enrichment so the enriched rank stays <= max_rank.
+      svd.max_kept_singular_values =
+        options.max_rank > native_cross.kickrank ? options.max_rank - native_cross.kickrank
+                                                 : options.max_rank;
+    }
     svd(score);
     auto u = svd.U;
     auto s = svd.S;
     auto v = svd.V;
     auto r = svd.significant_singular_values;
+    const std::size_t kick_columns = options.max_rank > 0
+      ? std::min<std::size_t>(native_cross.kickrank, options.max_rank > r ? options.max_rank - r : 0)
+      : native_cross.kickrank;
 
     // for compatibility with tt-toolbox
     u *= -1.0;
@@ -305,11 +398,11 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     {
       ::boba::apply_as_diagonal_right_in_place(s, v);
 
-      matrix_t<data_t> ur({u.rows(), native_cross.kickrank});
+      matrix_t<data_t> ur({u.rows(), kick_columns});
       ur.fill_with_zeros();
 
-      matrix_t<data_t> random_enrichment({u.rows(), native_cross.kickrank});
-      random_enrichment.fill_with_random();
+      matrix_t<data_t> random_enrichment({u.rows(), kick_columns});
+      random_enrichment.fill_with_random(thread_random_context());
       ur.reshape(random_enrichment);
 
       u = native_cross.reorthogonalize(u, ur);
@@ -327,11 +420,11 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     {
       ::boba::apply_as_diagonal_right_in_place(s, u);
 
-      matrix_t<data_t> vr({v.rows(), native_cross.kickrank});
+      matrix_t<data_t> vr({v.rows(), kick_columns});
       vr.fill_with_zeros();
 
-      matrix_t<data_t> random_enrichment({v.rows(), native_cross.kickrank});
-      random_enrichment.fill_with_random();
+      matrix_t<data_t> random_enrichment({v.rows(), kick_columns});
+      random_enrichment.fill_with_random(thread_random_context());
 
       vr.reshape(random_enrichment);
       v = native_cross.reorthogonalize(v, vr);
@@ -454,7 +547,7 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
         {
           index_t value = 0;
 
-          if (core_id == previous_indices_view.sizes(1))
+          if (k == core_id)
           {
             value = mode_index;
           }
@@ -565,14 +658,39 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
       {
         sweep_right = not(sweep_right);
         sweep_count = sweep_count + 1;
+        if (val_size > 0)
+        {
+          const double err = validation_error();
+          if (info)
+          {
+            info->val_history.push_back(err);
+            info->final_error = err;
+          }
+          const auto& hist = info->val_history;
+          // Stalled: the error fell, but by less than val_stall of its previous value, and it
+          // is already close to the tolerance. A sweep that *raises* the error (the random
+          // start or enrichment landed badly) is not a stall: keep sweeping. Never stop on a
+          // stall while the error is still far (> 10x) above the tolerance.
+          const double prev = hist.size() >= 2 ? hist[hist.size() - 2] : 0.0;
+          const bool stalled =
+            options.val_stall > 0.0 && hist.size() >= 2 && err <= prev &&
+            prev - err < options.val_stall * prev && err < 10.0 * options.tolerance;
+          if (err < options.tolerance || stalled)
+            not_converged = false;
+          max_relative_error = 0.0;
+        }
         // Native compares a double accumulator against real_data_t; the cast is the
         // same promotion the native code performs implicitly, made explicit for float.
-        if (max_relative_error < static_cast<double>(native_cross.convergence_tolerance))
+        else if (max_relative_error < static_cast<double>(native_cross.convergence_tolerance))
         {
+          if (info)
+            info->final_error = max_relative_error;
           not_converged = false;
         }
         else
         {
+          if (info)
+            info->final_error = max_relative_error;
           max_relative_error = 0.0;
         }
       }
@@ -583,17 +701,24 @@ RuntimeTensorTrain<data_t> runtime_dmrg_cross(
     }
   }
 
+  if (info)
+  {
+    info->sweeps = sweep_count - 1;
+    info->converged = !not_converged;
+  }
   return approximated_tt;
 }
 
 template RuntimeTensorTrain<float> runtime_dmrg_cross<float>(
   RuntimeTensorTrain<float> const&,
   Evaluator<float>&,
-  CrossOptions const&);
+  CrossOptions const&,
+  CrossInfo*);
 
 template RuntimeTensorTrain<double> runtime_dmrg_cross<double>(
   RuntimeTensorTrain<double> const&,
   Evaluator<double>&,
-  CrossOptions const&);
+  CrossOptions const&,
+  CrossInfo*);
 
 } // namespace boba_python
