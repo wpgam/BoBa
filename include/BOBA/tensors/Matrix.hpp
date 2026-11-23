@@ -157,7 +157,7 @@ struct Matrix : Tensor<2, space, _data_t>
    * \return Matrix with every element negated.
    */
   [[nodiscard]]
-  Matrix operator-()
+  Matrix operator-() const
   {
     Matrix output{*this};
     output *= -1.0;
@@ -437,31 +437,45 @@ struct Matrix : Tensor<2, space, _data_t>
    * Computes the Matrix 1-norm of this Matrix, ||A||_1.
    */
 
-  data_t matrix_one_norm()
+  template<bool force_naive = false>
+  data_t matrix_one_norm() const
   {
     BOBA_CALI_OBJECT_MARK
-
-    auto rows = this->rows();
-    auto cols = this->cols();
-    auto this_view = this->view();
 
     if (this->size() == 0)
     {
       return data_t{0};
     }
 
-    ::boba::Vector<space, data_t> column_sums({cols});
-    column_sums.fill_with_zeros();
-    auto column_sums_view = column_sums.atomic_view();
+    const auto rows = this->rows();
+    const auto cols = this->cols();
 
-    ::boba::loop<space, 2>({rows, cols},
-                           [=] __boba_host_device__(Array<index_t, 2> ij)
+    constexpr bool use_cuda = boba_cuda_enabled() and (space == execution_space::CUDA);
+
+    data_t result;
+
+    if constexpr (use_cuda and not(force_naive))
     {
-      auto j = ij[1];
-      column_sums_view(j) += ::boba::abs(this_view(ij));
-    });
+      result = ::boba::detail::matrix_one_norm(this->data(), rows, cols);
+    }
+    else
+    {
+      const auto this_view = this->const_view();
+      ::boba::Vector<space, data_t> column_sums({cols});
+      column_sums.fill_with_zeros();
+      auto column_sums_view = column_sums.atomic_view();
 
-    return column_sums.max_reduce();
+      ::boba::loop<space, 2>({rows, cols},
+                            [=] __boba_host_device__(Array<index_t, 2> ij)
+      {
+        auto j = ij[1];
+        column_sums_view(j) += ::boba::abs(this_view(ij));
+      });
+
+      result = column_sums.max_reduce();
+    }
+
+    return result;
   }
 
   /**
@@ -469,31 +483,45 @@ struct Matrix : Tensor<2, space, _data_t>
    * Computes the Matrix infinity-norm of this Matrix, ||A||_inf.
    */
 
-  data_t matrix_inf_norm()
+  template<bool force_naive = false>
+  data_t matrix_inf_norm() const
   {
     BOBA_CALI_OBJECT_MARK
-
-    auto rows = this->rows();
-    auto cols = this->cols();
-    auto this_view = this->view();
 
     if (this->size() == 0)
     {
       return data_t{0};
     }
 
-    ::boba::Vector<space, data_t> row_sums({rows});
-    row_sums.fill_with_zeros();
-    auto row_sums_view = row_sums.atomic_view();
+    const auto rows = this->rows();
+    const auto cols = this->cols();
 
-    ::boba::loop<space, 2>({rows, cols},
-                           [=] __boba_host_device__(Array<index_t, 2> ij)
+    constexpr bool use_cuda = boba_cuda_enabled() and (space == execution_space::CUDA);
+
+    data_t result;
+
+    if constexpr (use_cuda and not(force_naive))
     {
-      auto i = ij[0];
-      row_sums_view(i) += ::boba::abs(this_view(ij));
-    });
+      result = ::boba::detail::matrix_linf_norm(this->data(), rows, cols);
+    }
+    else
+    {
+      const auto this_view = this->const_view();
+      ::boba::Vector<space, data_t> row_sums({rows});
+      row_sums.fill_with_zeros();
+      auto row_sums_view = row_sums.atomic_view();
 
-    return row_sums.max_reduce();
+      ::boba::loop<space, 2>({rows, cols},
+                            [=] __boba_host_device__(Array<index_t, 2> ij)
+      {
+        auto i = ij[0];
+        row_sums_view(i) += ::boba::abs(this_view(ij));
+      });
+
+      result = row_sums.max_reduce();
+    }
+
+    return result;
   }
 
   /**
@@ -664,11 +692,11 @@ struct Matrix : Tensor<2, space, _data_t>
  */
 
 template <execution_space space, typename data_t>
-::boba::Matrix<space, data_t> diagonalize(::boba::Vector<space, data_t> diagonal)
+::boba::Matrix<space, data_t> diagonalize(::boba::Vector<space, data_t> const& diagonal)
 {
   BOBA_CALI_OBJECT_MARK
   ::boba::Matrix<space, data_t> new_matrix({diagonal.size(), diagonal.size()});
-  auto diagonal_view = diagonal.view();
+  const auto diagonal_view = diagonal.const_view();
   auto new_matrix_view = new_matrix.view();
   new_matrix.fill_with_zeros();
   ::boba::detail::loop<space>(0, new_matrix.rows(), [=] __boba_host_device__(index_t i)
@@ -685,12 +713,12 @@ template <execution_space space, typename data_t>
  */
 
 template <execution_space space, typename data_t>
-::boba::Vector<space, data_t> diagonalize(::boba::Matrix<space, data_t> input)
+::boba::Vector<space, data_t> diagonalize(::boba::Matrix<space, data_t> const& input)
 {
   BOBA_CALI_OBJECT_MARK
-  auto length = boba::min(input.rows(), input.cols());
+  const auto length = boba::min(input.rows(), input.cols());
   ::boba::Vector<space, data_t> new_vector({length});
-  auto input_view = input.const_view();
+  const auto input_view = input.const_view();
   auto new_vector_view = new_vector.view();
   ::boba::detail::loop<space>(0, new_vector.size(), [=] __boba_host_device__(index_t i)
   {

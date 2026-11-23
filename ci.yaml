@@ -39,17 +39,32 @@
     tutorial_6_htucker:
       skip: [hip, cuda]
 
+  test_htucker:
+    test_htucker:
+      skip: [hip, cuda]
+
   tutorial_7_quantized_tensor_trains:
     tutorial_7_quantized_tensor_trains:
       skip: []
 
   tutorial_8_canonical_polyadic:
-     tutorial_8_canonical_polyadic:     
+     tutorial_8_canonical_polyadic:
       skip: []
 
   test_abstractions:
     test_abstractions:
       skip: [cuda, hip]
+
+  test_reductions:
+    test_reductions_1e2:
+      inputs: "-n 100"
+      skip: []
+    test_reductions_1e5:
+      inputs: "-n 10000"
+      skip: []
+    test_reductions_1e7:
+      inputs: "-n 1000000"
+      skip: []
 
   test_argparse:
     test_argparse_help_short:
@@ -373,6 +388,63 @@
 
   test_SparseTensor_functions:
     test_SparseTensor_functions:
+      skip: []
+
+  test_matrix_norms:
+    test_matrix_norms:
+      inputs: "--rows 8 --cols 9"
+      skip: []
+    test_matrix_norms_tall:
+      inputs: "--rows 9 --cols 8"
+      skip: []
+    test_matrix_norms_short_columns:
+      inputs: "--rows 4097 --cols 10"
+      skip: []
+    test_matrix_norms_short_rows:
+      inputs: "--rows 10 --cols 4097"
+      skip: []
+    test_matrix_norms_block_sum_columns:
+      inputs: "--rows 4097 --cols 33"
+      skip: []
+    test_matrix_norms_block_sum_rows:
+      inputs: "--rows 33 --cols 4097"
+      skip: []
+    test_matrix_norms_short_columns_thread_stride:
+      inputs: "--rows 262145 --cols 10"
+      skip: []
+    test_matrix_norms_short_rows_thread_stride:
+      inputs: "--rows 10 --cols 262145"
+      skip: []
+    test_matrix_norms_single_row:
+      inputs: "--rows 1 --cols 9"
+      skip: []
+    test_matrix_norms_wide_cuda_grid:
+      inputs: "--rows 1 --cols 524288"
+      skip: [hip]
+    test_matrix_norms_single_column:
+      inputs: "--rows 9 --cols 1"
+      skip: []
+    test_matrix_norms_timing:
+      inputs: "--rows 128 --cols 128 --timing --repetitions 10"
+      skip: []
+
+  test_SparseTensorTrainMatrix:
+    test_SparseTensorTrainMatrix:
+      skip: []
+
+  test_BCOOTensor:
+    test_BCOOTensor:
+      skip: []
+
+  test_sparse_contraction_benchmark:
+    test_sparse_contraction_benchmark:
+      skip: []
+    test_sparse_contraction_benchmark_density_5:
+      inputs: "--density 0.05 --mode_size 8"
+      skip: []
+
+  test_SparseMatrix:
+    test_SparseMatrix:
       skip: []
 
   test_io:
@@ -964,6 +1036,9 @@
     test_tensor_completion_3d:
       inputs: "--samples 800 --rank 5 --bin-width 0.5 --dims 20 20 20"
       skip: [cuda, hip]
+    test_tensor_completion_3d_dense:
+      inputs: "--samples 300 --rank 4 --bin-width 0.5 --dims 10 10 10 --dense-apr"
+      skip: [cuda, hip]
     test_tensor_completion_4d:
       inputs: "--samples 800 --rank 5 --bin-width 0.5 --dims 12 12 12 12"
       skip: [cuda, hip, debug, ubsan, asan]
@@ -989,15 +1064,45 @@
       inputs: "--rows 6 --columns 10"
 
   test_tt_solvers:
+    test_sparse_operator_iterative:
+      inputs: "--dimension 3 --sparse_solver --solve3d_2ml_method 2 --max_direct_solve_size -1"
+      skip: [hip, cuda]
+    test_sparse_operator_direct:
+      inputs: "--dimension 3 --sparse_solver --solve3d_2ml_method 2 --max_direct_solve_size 999999"
+      skip: [hip, cuda]
     test_amen_2d:
       inputs: "--dimension 2 --which 0"
       skip: [hip]
+    test_amen_2d_iterative_eigen_gmres:
+      inputs: "--dimension 2 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 0 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_2d_iterative_boba_matrix_gmres:
+      inputs: "--dimension 2 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 1 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_2d_iterative_boba_operator_gmres:
+      inputs: "--dimension 2 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
     test_amen_3d:
       inputs: "--dimension 3 --which 0"
       skip: [cuda, hip]
     test_amen_4d:
       inputs: "--dimension 4 --which 0"
       skip: [hip, cuda] # non-deterministic failures
+    test_amen_4d_iterative_eigen_gmres:
+      inputs: "--dimension 4 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 0 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_4d_iterative_boba_matrix_gmres:
+      inputs: "--dimension 4 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 1 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_4d_iterative_boba_operator_gmres:
+      inputs: "--dimension 4 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_4d_iterative_boba_operator_gmres_res8:
+      inputs: "--dimension 4 --resolution 8 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_4d_iterative_boba_operator_gmres_res8_no_preconditioner:
+      inputs: "--dimension 4 --resolution 8 --which 0 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10 --no_row_norm_preconditioner"
+      skip: [cuda, hip]
     test_amen_high:
       inputs: "--resolution 64 --dimension 2 --which 0"
       skip: [cuda, hip, debug]
@@ -1013,12 +1118,30 @@
     test_dmrg_2d:
       inputs: "--dimension 2 --which 1"
       skip: [hip]
+    test_dmrg_2d_iterative_eigen_gmres:
+      inputs: "--dimension 2 --which 1 --max_direct_solve_size 0 --solve3d_2ml_method 0 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_dmrg_2d_iterative_boba_matrix_gmres:
+      inputs: "--dimension 2 --which 1 --max_direct_solve_size 0 --solve3d_2ml_method 1 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_dmrg_2d_iterative_boba_operator_gmres:
+      inputs: "--dimension 2 --which 1 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
     test_dmrg_3d:
       inputs: "--dimension 3 --which 1"
       skip: [hip]
     test_dmrg_4d:
       inputs: "--dimension 4 --which 1"
       skip: [hip, cuda, ubsan, asan]
+    test_dmrg_4d_iterative_eigen_gmres:
+      inputs: "--dimension 4 --which 1 --max_direct_solve_size 0 --solve3d_2ml_method 0 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip, ubsan, asan]
+    test_dmrg_4d_iterative_boba_matrix_gmres:
+      inputs: "--dimension 4 --which 1 --max_direct_solve_size 0 --solve3d_2ml_method 1 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip, ubsan, asan]
+    test_dmrg_4d_iterative_boba_operator_gmres:
+      inputs: "--dimension 4 --which 1 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip, ubsan, asan]
     test_dmrg_high:
       inputs: "--resolution 64 --dimension 2 --which 1"
       skip: [cuda, hip, debug, ubsan, asan]
@@ -1033,14 +1156,59 @@
       skip: [cpu, cuda, hip, debug, ubsan, asan]
 
   test_amen_block:
+    test_amen_block_sparse_2d_direct:
+      inputs: "--dimension 2 --resolution 3 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 1500 --sparse_operator"
+      skip: []
+    test_amen_block_sparse_2d_iterative:
+      inputs: "--dimension 2 --resolution 4 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10 --sparse_operator"
+      skip: []
+    test_amen_block_sparse_3d_iterative:
+      inputs: "--dimension 3 --resolution 2 --coupling_strength 0.1 --coupling_rank 1 --exact_solution_rank 2 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10 --sparse_operator"
+      skip: []
+    test_amen_block_sparse_4d_direct:
+      inputs: "--dimension 4 --resolution 2 --coupling_strength 0.1 --coupling_rank 1 --exact_solution_rank 2 --max_direct_solve_size 1500 --sparse_operator"
+      skip: []
+    test_amen_block_bcoo_2d_direct:
+      inputs: "--dimension 2 --resolution 3 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 1500 --bcoo_operator"
+      skip: [cuda, hip]
+    test_amen_block_bcoo_2d_iterative:
+      inputs: "--dimension 2 --resolution 4 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10 --bcoo_operator"
+      skip: [cuda, hip]
+    test_amen_block_bcoo_3d_iterative:
+      inputs: "--dimension 3 --resolution 2 --coupling_strength 0.1 --coupling_rank 1 --exact_solution_rank 2 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10 --bcoo_operator"
+      skip: [cuda, hip]
+    test_amen_block_bcoo_4d_direct:
+      inputs: "--dimension 4 --resolution 2 --coupling_strength 0.1 --coupling_rank 1 --exact_solution_rank 2 --max_direct_solve_size 1500 --bcoo_operator"
+      skip: [cuda, hip]
+    test_amen_block_2d_direct:
+      inputs: "--dimension 2 --resolution 4 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 1500"
+      skip: [cuda, hip]
     test_amen_block_2d:
       inputs: "--dimension 2 --resolution 4 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0"
+      skip: [cuda, hip]
+    test_amen_block_2d_iterative_boba_matrix_gmres:
+      inputs: "--dimension 2 --resolution 4 --coupling_strength 0 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0 --solve3d_2ml_method 1 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_block_2d_iterative_boba_operator_gmres:
+      inputs: "--dimension 2 --resolution 4 --coupling_strength 0 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
       skip: [cuda, hip]
     test_amen_block_3d:
       inputs: "--dimension 3 --resolution 4 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0"
       skip: [cuda, hip]
+    test_amen_block_3d_strong_coupling:
+      inputs: "--dimension 3 --resolution 5 --coupling_strength 0.5 --coupling_rank 3 --exact_solution_rank 4 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
     test_amen_block_4d:
       inputs: "--dimension 4 --resolution 3 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0"
+      skip: [cuda, hip]
+    test_amen_block_4d_direct:
+      inputs: "--dimension 4 --resolution 3 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 1500"
+      skip: [cuda, hip]
+    test_amen_block_4d_iterative_boba_matrix_gmres:
+      inputs: "--dimension 4 --resolution 3 --coupling_strength 0 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0 --solve3d_2ml_method 1 --solve3d_2ml_tolerance_relative 1e-10"
+      skip: [cuda, hip]
+    test_amen_block_4d_iterative_boba_operator_gmres:
+      inputs: "--dimension 4 --resolution 3 --coupling_strength 0 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0 --solve3d_2ml_method 2 --solve3d_2ml_tolerance_relative 1e-10"
       skip: [cuda, hip]
     test_amen_block_singleton_3d:
       inputs: "--dimension 3 --resolution 1 --coupling_strength 0.2 --coupling_rank 2 --exact_solution_rank 3 --max_direct_solve_size 0"

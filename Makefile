@@ -5,6 +5,7 @@ BOBA_TOP_DIR=.
 endif
 
 TESTS_DIR=examples/tests
+BENCHMARKS_DIR=examples/benchmarks
 EXAMPLES_DIR=examples/exercises
 TUTOR_DIR=examples/tutorials
 CLANG_FORMAT ?= clang-format
@@ -77,6 +78,8 @@ all: \
 	test_argparse \
 	test_fft \
 	test_abstractions \
+	test_reductions \
+	test_matrix_norms \
 	test_krylov \
 	test_preconditioner \
 	test_tensor_train_matrix \
@@ -84,6 +87,10 @@ all: \
 	test_tensors \
 	test_SparseTensor \
 	test_SparseTensor_functions \
+	test_SparseTensorTrainMatrix \
+	test_BCOOTensor \
+	test_sparse_contraction_benchmark \
+	test_SparseMatrix \
 	test_subtensorviews \
 	test_cp \
 	test_tensor_completion \
@@ -93,6 +100,7 @@ all: \
 	test_block_operator \
 	test_amen_block \
 	test_io \
+	test_htucker \
 	test_orthogonalize \
 	test_sum_and_round \
 	test_static_views \
@@ -282,6 +290,7 @@ test_tt_solvers${NAME_FLAG}.out: test_tt_solvers${NAME_FLAG}.o boba${NAME_FLAG}.
 
 test_tt_solvers${NAME_FLAG}.o: ${TESTS_DIR}/test_tt_solvers.cpp ${BOBA_INC} boba${NAME_FLAG}.o
 	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_tt_solvers.cpp -o test_tt_solvers${NAME_FLAG}.o
+
 ###############################
 test_backsolve: test_backsolve${NAME_FLAG}.out
 	echo "Done making $@${NAME_FLAG}.out"
@@ -311,6 +320,16 @@ test_abstractions${NAME_FLAG}.out: test_abstractions${NAME_FLAG}.o boba${NAME_FL
 
 test_abstractions${NAME_FLAG}.o: ${TESTS_DIR}/test_abstractions.cpp ${BOBA_INC} boba${NAME_FLAG}.o
 	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_abstractions.cpp -o test_abstractions${NAME_FLAG}.o
+
+###############################
+test_reductions: test_reductions${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_reductions${NAME_FLAG}.out: test_reductions${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_reductions${NAME_FLAG}.o: ${TESTS_DIR}/test_reductions.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_reductions.cpp -o test_reductions${NAME_FLAG}.o
 
 ###############################
 test_boba_linear_algebra: test_boba_linear_algebra${NAME_FLAG}.out
@@ -502,6 +521,56 @@ test_SparseTensor_functions${NAME_FLAG}.o: ${TESTS_DIR}/test_SparseTensor_functi
 	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_SparseTensor_functions.cpp -o test_SparseTensor_functions${NAME_FLAG}.o
 
 ###############################
+test_BCOOTensor: test_BCOOTensor${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_BCOOTensor${NAME_FLAG}.out: test_BCOOTensor${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_BCOOTensor${NAME_FLAG}.o: ${TESTS_DIR}/test_BCOOTensor.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_BCOOTensor.cpp -o test_BCOOTensor${NAME_FLAG}.o
+
+###############################
+test_SparseTensorTrainMatrix: test_SparseTensorTrainMatrix${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_SparseTensorTrainMatrix${NAME_FLAG}.out: test_SparseTensorTrainMatrix${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_SparseTensorTrainMatrix${NAME_FLAG}.o: ${TESTS_DIR}/test_SparseTensorTrainMatrix.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_SparseTensorTrainMatrix.cpp -o test_SparseTensorTrainMatrix${NAME_FLAG}.o
+
+###############################
+test_sparse_contraction_benchmark: test_sparse_contraction_benchmark${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_sparse_contraction_benchmark${NAME_FLAG}.out: test_sparse_contraction_benchmark${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_sparse_contraction_benchmark${NAME_FLAG}.o: ${TESTS_DIR}/test_sparse_contraction_benchmark.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_sparse_contraction_benchmark.cpp -o test_sparse_contraction_benchmark${NAME_FLAG}.o
+
+###############################
+test_matrix_norms: test_matrix_norms${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_matrix_norms${NAME_FLAG}.out: test_matrix_norms${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_matrix_norms${NAME_FLAG}.o: ${BENCHMARKS_DIR}/matrix_norms/test_matrix_norms.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${BENCHMARKS_DIR}/matrix_norms/test_matrix_norms.cpp -o test_matrix_norms${NAME_FLAG}.o
+
+###############################
+test_SparseMatrix: test_SparseMatrix${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_SparseMatrix${NAME_FLAG}.out: test_SparseMatrix${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_SparseMatrix${NAME_FLAG}.o: ${TESTS_DIR}/test_SparseMatrix.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_SparseMatrix.cpp -o test_SparseMatrix${NAME_FLAG}.o
+
+###############################
 test_cp: test_cp${NAME_FLAG}.out
 	echo "Done making $@${NAME_FLAG}.out"
 
@@ -597,6 +666,15 @@ test_io${NAME_FLAG}.out: test_io${NAME_FLAG}.o boba${NAME_FLAG}.o
 
 test_io${NAME_FLAG}.o: ${TESTS_DIR}/test_io.cpp ${BOBA_INC} boba${NAME_FLAG}.o
 	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_io.cpp -o test_io${NAME_FLAG}.o
+###############################
+test_htucker: test_htucker${NAME_FLAG}.out
+	echo "Done making $@${NAME_FLAG}.out"
+
+test_htucker${NAME_FLAG}.out: test_htucker${NAME_FLAG}.o boba${NAME_FLAG}.o
+	${LINK} -o $@ $^ ${LIBS}
+
+test_htucker${NAME_FLAG}.o: ${TESTS_DIR}/test_htucker.cpp ${BOBA_INC} boba${NAME_FLAG}.o
+	${COMPILE} ${OPTS} -c ${TESTS_DIR}/test_htucker.cpp -o test_htucker${NAME_FLAG}.o
 ###############################
 test_sum_and_round: test_sum_and_round${NAME_FLAG}.out
 	echo "Done making $@${NAME_FLAG}.out"

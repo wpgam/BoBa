@@ -10,6 +10,7 @@
 // Common
 #include "BOBA/abstractions/common.hpp"
 #include "BOBA/abstractions/types.hpp"
+#include "BOBA/abstractions/random.hpp"
 #include "BOBA/abstractions/assert.hpp"
 #include "BOBA/abstractions/math.hpp"
 #include "BOBA/objects/Complex.hpp"
@@ -22,6 +23,8 @@
 
 // Backends
 #include "BOBA/backends/boba_cuda.hpp"
+#include "BOBA/backends/boba_cuda_cccl.hpp"
+#include "BOBA/backends/boba_cuda_manual.hpp"
 #include "BOBA/backends/boba_hip.hpp"
 #include "BOBA/backends/boba_sequential.hpp"
 
@@ -34,6 +37,7 @@
 #include "BOBA/abstractions/atomics.hpp"
 #include "BOBA/abstractions/loops.hpp"
 #include "BOBA/abstractions/reductions.hpp"
+#include "BOBA/backends/boba_cub.hpp"
 #include "BOBA/abstractions/tictoc.hpp"
 
 // Dynamic objects
@@ -48,6 +52,11 @@
 #include "BOBA/tensors/SparseTensor.hpp"
 #include "BOBA/abstractions/argparser.hpp"
 #include "BOBA/tensors/Matrix.hpp"
+#include "BOBA/sparse/COOMatrix.hpp"
+#include "BOBA/sparse/CSRMatrix.hpp"
+#include "BOBA/sparse/ELLPACKMatrix.hpp"
+#include "BOBA/sparse/BCOOMatrix.hpp"
+#include "BOBA/sparse/SparseMatrix_functions.hpp"
 #include "BOBA/tensors/PermutationMatrix.hpp"
 
 // Linear algebra
@@ -71,6 +80,8 @@
 #include "BOBA/tensors/Matrix_functions.hpp"
 #include "BOBA/tensors/Tensor_functions.hpp"
 #include "BOBA/tensors/SparseTensor_functions.hpp"
+#include "BOBA/tensors/BCOOTensor.hpp"
+#include "BOBA/tensors/BCOOTensor_functions.hpp"
 
 // Fast Fourier Transform
 #include "BOBA/backends/boba_eigen_fft.hpp"
@@ -93,6 +104,7 @@
 #include "BOBA/TensorTrain/StaticTensorTrainView.hpp"
 #include "BOBA/TensorTrain/DynamicTensorTrainView.hpp"
 #include "BOBA/TensorTrain/TensorTrainMatrix.hpp"
+#include "BOBA/TensorTrain/SparseTensorTrainMatrix.hpp"
 #include "BOBA/TensorTrain/TensorTrainSplitMatrix.hpp"
 #include "BOBA/TensorTrain/TensorTrain_functions.hpp"
 #include "BOBA/TensorTrain/TensorTrainMatrix_functions.hpp"
@@ -130,6 +142,7 @@
 #include "BOBA/Krylov/Krylov.hpp"
 #include "BOBA/TensorTrain/DMRGCross.hpp"
 #include "BOBA/TensorTrain/TensorTrainSolver_utilities.hpp"
+#include "BOBA/TensorTrain/BCOOTensor_kernels.hpp"
 #include "BOBA/TensorTrain/TensorTrainAMEN.hpp"
 #include "BOBA/TensorTrain/TensorTrainAMENBlock.hpp"
 #include "BOBA/TensorTrain/TensorTrainDMRG.hpp"

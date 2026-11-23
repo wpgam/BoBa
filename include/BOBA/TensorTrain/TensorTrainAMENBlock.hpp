@@ -14,7 +14,8 @@ struct TensorTrainAMENBlock
     Unlike the MATLAB version, it supports block systems whose nonzero blocks
     may have different mode sizes as long as each block maps between compatible
     TensorTrain dimensions. The operator is represented as a
-    BlockOperator<TensorTrainMatrix<...>> and the vectors as
+    BlockOperator<TensorTrainMatrix<...>> or
+    BlockOperator<SparseTensorTrainMatrix<...>> and the vectors as
     BlockVector<TensorTrain<...>>.
   */
 
@@ -38,9 +39,9 @@ struct TensorTrainAMENBlock
   // per-block scalar bookkeeping does not preserve the off-diagonal projected
   // equations, so coupled solves use unnormalized environments.
   bool normalize_coupled_intermediate_quantities = false;
-  // Scale the assembled dense coupled site equations explicitly before the
-  // local solve. This is an algebraic row scaling of B*x=rhs; residual
-  // diagnostics and enrichment continue to use the original unscaled system.
+  // Scale the coupled site equations explicitly before the local solve. This
+  // is scalar-row equilibration of B*x=rhs; residual diagnostics and
+  // enrichment continue to use the original unscaled system.
   // Unknown/column scaling is intentionally avoided because projected coupled
   // systems may have gauge/nullspace freedom, and reweighting unknowns can
   // change the least-squares representative selected by the local solve.
@@ -80,20 +81,27 @@ struct TensorTrainAMENBlock
    * The operator and vectors are organized as block containers whose entries are
    * TT matrices and TT vectors, respectively. Diagonal-only systems reduce to
    * independent local AMEn updates, while systems with off-diagonal blocks use a
-   * coupled site solve and a final block-scalar correction. Unlike the MATLAB
+   * coupled site solve. Unlike the MATLAB
    * block AMEn implementation, block mode sizes are allowed to differ across
    * rows and columns as long as each nonzero block maps between compatible sizes.
+   * Sparse operator cores remain sparse during contractions. Their iterative
+   * diagonal site solves require `solve3d_2ml_options.method == 2`.
    *
+   * \tparam random_generator_t Type satisfying the C++
+   *          UniformRandomBitGenerator requirements.
    * \param[in] crA Square block operator.
    * \param[in] cry Block right-hand side.
    * \param[in] tt_initial_guess Initial block TT iterate.
+   * \param[in,out] random_generator Generator used for residual enrichment.
    * \return Final block TT solution, returned in host space.
    */
-  template <size_t dimension, execution_space space>
+  template <size_t dimension, execution_space space, typename operator_t, typename random_generator_t>
+    requires(TensorTrainOperatorType<operator_t, dimension, space, data_t>)
   ::boba::BlockVector<::boba::TensorTrain<dimension, host_space, data_t>> solve(
-    const ::boba::BlockOperator<::boba::TensorTrainMatrix<dimension, space, data_t>>& crA,
+    const ::boba::BlockOperator<operator_t>& crA,
     const ::boba::BlockVector<::boba::TensorTrain<dimension, space, data_t>>& cry,
-    const ::boba::BlockVector<::boba::TensorTrain<dimension, space, data_t>>& tt_initial_guess)
+    const ::boba::BlockVector<::boba::TensorTrain<dimension, space, data_t>>& tt_initial_guess,
+    random_generator_t& random_generator)
   {
     BOBA_CALI_MARK
     checkpoint();
@@ -184,7 +192,7 @@ struct TensorTrainAMENBlock
         auto rank_right = (d == dimension - 1) ? 1 : z_rank;
 
         crz[ki].cores[d].resize({rank_left, cry(ki).sizes(d), rank_right});
-        crz[ki].cores[d].fill_with_random();
+        crz[ki].cores[d].fill_with_random(random_generator);
       }
     }
 
@@ -552,14 +560,16 @@ struct TensorTrainAMENBlock
           boba::Vector<space, data_t> coupled_sol_prev_full({total_local_size});
           coupled_sol_prev_full.fill_with_zeros();
 
-          std::vector<data_t> coupled_row_norm_squared(Kay, 0.0);
+          using real_data_t = real_type_t<data_t>;
+          std::vector<Vector<space, real_data_t>> coupled_row_norm_squared(Kay);
           for (size_t ki = 0; ki < Kay; ki++)
           {
             // Assemble the dense site matrix block-by-block from the projected
             // TT operator environments and the old local iterate.
             copy_vector_block(coupled_rhs_full, coupled_offsets[ki], coupled_rhs[ki]);
             copy_vector_block(coupled_sol_prev_full, coupled_offsets[ki], flatten(site_x_cores[ki]));
-            coupled_row_norm_squared[ki] += coupled_norm_rhs[ki] * coupled_norm_rhs[ki];
+            coupled_row_norm_squared[ki].resize(coupled_rhs[ki].sizes());
+            coupled_row_norm_squared[ki].fill_with_zeros();
 
             for (size_t kj = 0; kj < Kay; kj++)
             {
@@ -573,8 +583,11 @@ struct TensorTrainAMENBlock
                 crA({ki, kj}).cores[i],
                 phia[ki][kj].cores[i + 1]);
 
-              auto B_block_norm = ::boba::norm_frobenius(B_block);
-              coupled_row_norm_squared[ki] += B_block_norm * B_block_norm;
+              // B_block is already assembled for insertion into the coupled
+              // dense system, so compute its row norms directly instead of
+              // recomputing the same operator matrix-free.
+              auto B_block_row_norms = matrix_row_norms(B_block);
+              coupled_row_norm_squared[ki] += ::boba::power(B_block_row_norms, real_data_t(2));
 
               coupled_B.replace_submatrix(
                 {coupled_offsets[ki], coupled_offsets[ki + 1]},
@@ -626,10 +639,15 @@ struct TensorTrainAMENBlock
               // a different local representative.
               auto coupled_B_scaled = coupled_B;
               auto coupled_rhs_scaled = coupled_rhs_full;
-              std::vector<data_t> row_factors(Kay, 1.0);
+              std::vector<Vector<space, real_data_t>> row_factors(Kay);
               for (size_t ki = 0; ki < Kay; ki++)
               {
-                row_factors[ki] = make_local_scale_factor(coupled_row_norm_squared[ki]);
+                row_factors[ki] = ::boba::apply_function(coupled_row_norm_squared[ki],
+                  [] __boba_host_device__(real_data_t row_norm_squared)
+                {
+                  auto row_norm = ::boba::sqrt(row_norm_squared);
+                  return ::boba::is_tiny(row_norm) ? real_data_t(1) : real_data_t(1) / row_norm;
+                });
                 scale_vector_block(coupled_rhs_scaled, coupled_offsets[ki], coupled_offsets[ki + 1] - coupled_offsets[ki], row_factors[ki]);
               }
 
@@ -1358,6 +1376,30 @@ struct TensorTrainAMENBlock
     return host_crx;
   }
 
+  /**
+   * \brief Solves a block TT system using the process-wide default generator.
+   *
+   * Calling `boba::random::set_seed()` resets the sequence used for residual
+   * enrichment.
+   *
+   * \tparam dimension Tensor dimension.
+   * \tparam space Execution space.
+   * \param[in] crA Square block operator.
+   * \param[in] cry Block right-hand side.
+   * \param[in] tt_initial_guess Initial block TT iterate.
+   * \return Final block TT solution, returned in host space.
+   */
+  template <size_t dimension, execution_space space, typename operator_t>
+    requires(TensorTrainOperatorType<operator_t, dimension, space, data_t>)
+  ::boba::BlockVector<::boba::TensorTrain<dimension, host_space, data_t>> solve(
+    const ::boba::BlockOperator<operator_t>& crA,
+    const ::boba::BlockVector<::boba::TensorTrain<dimension, space, data_t>>& cry,
+    const ::boba::BlockVector<::boba::TensorTrain<dimension, space, data_t>>& tt_initial_guess)
+  {
+    auto& random_generator = ::boba::random::default_context();
+    return solve(crA, cry, tt_initial_guess, random_generator);
+  }
+
 private:
   template <execution_space space_local>
   ::boba::Vector<space_local, data_t> solve_coupled_site_system(
@@ -1377,10 +1419,11 @@ private:
     }
   }
 
-  template <size_t dimension_local, execution_space space_local>
+  template <size_t dimension_local, execution_space space_local, typename operator_t>
+    requires(TensorTrainOperatorType<operator_t, dimension_local, space_local, data_t>)
   ::boba::BlockVector<::boba::TensorTrain<dimension_local, space_local, data_t>>
   apply_nonempty_blocks(
-    const ::boba::BlockOperator<::boba::TensorTrainMatrix<dimension_local, space_local, data_t>>& crA,
+    const ::boba::BlockOperator<operator_t>& crA,
     const ::boba::BlockVector<::boba::TensorTrain<dimension_local, space_local, data_t>>& crx)
   {
     ::boba::BlockVector<::boba::TensorTrain<dimension_local, space_local, data_t>> output(crA.block_rows);
@@ -1432,11 +1475,11 @@ private:
    * \param[in] phase Short label used in exception messages.
    * \return Updated environment tensor and its normalization factor.
    */
-  template <size_t dimension_local, execution_space space_local>
+  template <size_t dimension_local, execution_space space_local, typename core_t>
   std::pair<::boba::Tensor<3, space_local, data_t>, data_t> compute_next_phi_block(
     const ::boba::Tensor<3, space_local, data_t>& Phi_prev,
     const ::boba::Tensor<3, space_local, data_t>& x,
-    const ::boba::Tensor<4, space_local, data_t>& A_core,
+    const core_t& A_core,
     const ::boba::Tensor<3, space_local, data_t>& y,
     bool sweep_left_right,
     data_t external_norm,
@@ -1564,72 +1607,48 @@ public:
   }
 
   /**
-   * \brief Convert a squared local block norm into a multiplicative scale.
-   *
-   * A zero or tiny norm means there is no useful scale information for that
-   * block, so the neutral factor is returned.
+   * \brief Scale a contiguous work-vector slice by scalar-row factors.
    */
-  data_t make_local_scale_factor(data_t norm_squared) const
-  {
-    if (norm_squared <= 0.0)
-    {
-      return 1.0;
-    }
-    auto norm = ::boba::sqrt(norm_squared);
-    if (::boba::is_tiny(norm))
-    {
-      return 1.0;
-    }
-    return 1.0 / norm;
-  }
-
-  /**
-   * \brief Scale one contiguous slice of a dense work vector in place.
-   */
-  template <execution_space space_local>
+  template <execution_space space_local, typename factor_t>
   void scale_vector_block(
     ::boba::Vector<space_local, data_t>& vector,
     index_t offset,
     index_t size,
-    data_t factor)
+    const ::boba::Vector<space_local, factor_t>& factors)
   {
-    if (::boba::abs(factor - 1.0) <= ::boba::epsilon<data_t>())
-    {
-      return;
-    }
+    boba_always_assert_equal(size, factors.size(), "incompatible scalar-row scaling sizes");
     auto vector_view = vector.view();
+    auto factors_view = factors.const_view();
     ::boba::loop<space_local, 1>(size,
                                  [=] __boba_host_device__(index_t idx)
     {
-      vector_view({offset + idx}) *= factor;
+      vector_view({offset + idx}) *= factors_view({idx});
     });
   }
 
   /**
-   * \brief Scale one dense matrix subblock in place.
+   * \brief Scale a dense matrix subblock by scalar-row factors.
    */
-  template <execution_space space_local>
+  template <execution_space space_local, typename factor_t>
   void scale_matrix_block(
     ::boba::Matrix<space_local, data_t>& matrix,
     index_t row_begin,
     index_t row_end,
     index_t col_begin,
     index_t col_end,
-    data_t factor)
+    const ::boba::Vector<space_local, factor_t>& factors)
   {
-    if (::boba::abs(factor - 1.0) <= ::boba::epsilon<data_t>())
-    {
-      return;
-    }
     auto rows = row_end - row_begin;
     auto cols = col_end - col_begin;
+    boba_always_assert_equal(rows, factors.size(), "incompatible scalar-row scaling sizes");
     auto matrix_view = matrix.view();
-    ::boba::loop<space_local, 1>(rows * cols,
+    auto factors_view = factors.const_view();
+    const ::boba::Multiindexer<2> block_indexer({cols, rows});
+    ::boba::loop<space_local, 1>(block_indexer.size(),
                                  [=] __boba_host_device__(index_t idx)
     {
-      auto row = idx / cols;
-      auto col = idx - row * cols;
-      matrix_view({row_begin + row, col_begin + col}) *= factor;
+      const auto [col, row] = block_indexer.multiindex(idx);
+      matrix_view({row_begin + row, col_begin + col}) *= factors_view({row});
     });
   }
 
@@ -1687,10 +1706,10 @@ private:
    * \param[in] phase Short label used in exception messages.
    * \return Local operator application in tensor form.
    */
-  template <execution_space space_local>
+  template <execution_space space_local, typename core_t>
   ::boba::Tensor<3, space_local, data_t> bfun3_block(
     const ::boba::Tensor<3, space_local, data_t>& Phi1,
-    const ::boba::Tensor<4, space_local, data_t>& A,
+    const core_t& A,
     const ::boba::Tensor<3, space_local, data_t>& Phi2,
     const ::boba::Tensor<3, space_local, data_t>& x,
     size_t row,
@@ -1729,10 +1748,10 @@ private:
    * \param[in] phase Short label used in exception messages.
    * \return Local diagonal operator application in tensor form.
    */
-  template <execution_space space_local>
+  template <execution_space space_local, typename core_t>
   ::boba::Tensor<3, space_local, data_t> bfun3_diag_block(
     const ::boba::Tensor<3, space_local, data_t>& Phi1,
-    const ::boba::Tensor<4, space_local, data_t>& A,
+    const core_t& A,
     const ::boba::Tensor<3, space_local, data_t>& Phi2,
     const ::boba::Tensor<3, space_local, data_t>& x,
     size_t row,
@@ -1766,24 +1785,32 @@ private:
    * \param[in] phia_ip1 Right environment tensor.
    * \return Local operator tensor before reshaping to a matrix.
    */
-  template <execution_space space>
+  template <execution_space space, typename core_t>
   Tensor<6, space, data_t> project_operator_A(
     const Tensor<3, space, data_t>& phia_i,
-    const Tensor<4, space, data_t>& A_core,
+    const core_t& A_core,
     const Tensor<3, space, data_t>& phia_ip1)
   {
     BOBA_CALI_MARK
-    checkpoint();
-    // First contract the left environment into the operator core.
-    auto phi1A1 = ::boba::tensor_contraction<1>(
-      {"rx", "rx_", "ra"}, phia_i, {"ra", "row", "col", "rap1"}, A_core, {"rx", "rx_", "row", "col", "rap1"});
+    if constexpr (IsBCOOTensorType<core_t>)
+    {
+      // The projected operator is dense; expand the block coordinate core once.
+      return project_operator_A(phia_i, to_dense(A_core), phia_ip1);
+    }
+    else
+    {
+      checkpoint();
+      // First contract the left environment into the operator core.
+      auto phi1A1 = ::boba::tensor_contraction<1>(
+        {"rx", "rx_", "ra"}, phia_i, {"ra", "row", "col", "rap1"}, A_core, {"rx", "rx_", "row", "col", "rap1"});
 
-    checkpoint();
-    // Then contract the right environment to finish the local operator tensor.
-    auto phi1A1phi2 = ::boba::tensor_contraction<1>(
-      {"rx", "rx_", "row", "col", "rap1"}, phi1A1, {"rxp1", "rap1", "rxp1_"}, phia_ip1, {"rx", "rx_", "row", "col", "rxp1", "rxp1_"});
+      checkpoint();
+      // Then contract the right environment to finish the local operator tensor.
+      auto phi1A1phi2 = ::boba::tensor_contraction<1>(
+        {"rx", "rx_", "row", "col", "rap1"}, phi1A1, {"rxp1", "rap1", "rxp1_"}, phia_ip1, {"rx", "rx_", "row", "col", "rxp1", "rxp1_"});
 
-    return phi1A1phi2;
+      return phi1A1phi2;
+    }
   }
 
   /**
@@ -1797,10 +1824,10 @@ private:
    * \param[in] phase Short label used in exception messages.
    * \return Local operator tensor before reshaping to a matrix.
    */
-  template <execution_space space_local>
+  template <execution_space space_local, typename core_t>
   Tensor<6, space_local, data_t> project_operator_A_block(
     const Tensor<3, space_local, data_t>& phia_i,
-    const Tensor<4, space_local, data_t>& A_core,
+    const core_t& A_core,
     const Tensor<3, space_local, data_t>& phia_ip1,
     size_t row,
     size_t site,

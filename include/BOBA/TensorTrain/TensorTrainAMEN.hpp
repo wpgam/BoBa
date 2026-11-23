@@ -5,6 +5,15 @@
 namespace boba
 {
 
+/**
+ * \brief Tensor-train matrix types supported by the AMEn solver.
+ */
+template <typename tensor_train_operator_t, size_t dimension, execution_space space, typename data_t>
+concept TensorTrainOperatorType =
+  std::same_as<
+    std::remove_cvref_t<tensor_train_operator_t>, TensorTrainMatrix<dimension, space, data_t>> or
+  is_sparse_tensor_train_matrix<std::remove_cvref_t<tensor_train_operator_t>, dimension, space, data_t>::value;
+
 template <typename data_t>
 struct TensorTrainAMEN
 {
@@ -33,29 +42,30 @@ struct TensorTrainAMEN
 
   Solve3D2MLOptions<data_t> solve3d_2ml_options;
 
-  template <typename unsupported_operator, typename unsupported_vector>
-  unsupported_vector solve(
-    const unsupported_operator& crA,
-    const unsupported_vector& cry,
-    const unsupported_vector& tt_initial_guess)
-  {
-    detail::ignore(crA);
-    detail::ignore(cry);
-    detail::ignore(tt_initial_guess);
-    boba_error("AMEN not yet supported for this operator/vector combination.");
-    return cry;
-  }
-
-  template <size_t dimension, execution_space space>
+  /**
+   * @brief Solves a TT linear system using caller-owned randomness.
+   * @tparam dimension Tensor dimension.
+   * @tparam space Execution space.
+   * @tparam random_generator_t Type satisfying the C++
+   *         UniformRandomBitGenerator requirements.
+   * @param crA Square TT matrix.
+   * @param cry Right-hand-side TT.
+   * @param tt_initial_guess Initial TT iterate.
+   * @param[in,out] random_generator Generator used for residual enrichment.
+   * @return The computed TT solution.
+   */
+  template <size_t dimension, execution_space space, typename tensor_train_operator_t, typename random_generator_t>
+    requires(TensorTrainOperatorType<tensor_train_operator_t, dimension, space, data_t>)
   ::boba::TensorTrain<dimension, space, data_t> solve(
-    const ::boba::TensorTrainMatrix<dimension, space, data_t>& crA,
+    const tensor_train_operator_t& crA,
     const ::boba::TensorTrain<dimension, space, data_t>& cry,
-    const ::boba::TensorTrain<dimension, space, data_t>& tt_initial_guess)
+    const ::boba::TensorTrain<dimension, space, data_t>& tt_initial_guess,
+    random_generator_t& random_generator)
   {
     BOBA_CALI_MARK
     checkpoint();
 
-    boba_always_assert_equal(crA.core_rows(), crA.core_cols(), "To use AMEN with rectangular systems, first form the normal equations  A^TAx = A^Tb and solve that system instead.");
+    boba_always_assert_equal(crA.rows(), crA.cols(), "To use AMEN with rectangular systems, first form the normal equations  A^TAx = A^Tb and solve that system instead.");
 
     auto crx = tt_initial_guess;
 
@@ -78,7 +88,7 @@ struct TensorTrainAMEN
 
       crz.cores[d].resize({rank_left, cry.sizes(d), rank_right});
       checkpoint();
-      crz.cores[d].fill_with_random();
+      crz.cores[d].fill_with_random(random_generator);
     }
 
     checkpoint();
@@ -536,7 +546,6 @@ struct TensorTrainAMEN
           crx.cores[i] = boba::reshape<3>(sol, {crx.ranks(i), cry.sizes(i), crx.ranks(i + 1)});
         }
       }
-
       data_t raw_global_res = 0.0;
       data_t global_res = 0.0;
       bool have_global_res = false;
@@ -544,7 +553,6 @@ struct TensorTrainAMEN
       {
         auto raw_global_residual = crA.TensorTrainMatrix_vector_multiply(crx);
         raw_global_residual -= cry;
-        raw_global_residual.round();
         raw_global_res = ::boba::norm_frobenius(raw_global_residual) / norm_cry;
 
         auto crx_rescaled = crx;
@@ -556,7 +564,6 @@ struct TensorTrainAMEN
 
         auto global_residual = crA.TensorTrainMatrix_vector_multiply(crx_rescaled);
         global_residual -= cry;
-        global_residual.round();
         global_res = ::boba::norm_frobenius(global_residual) / norm_cry;
         have_global_res = true;
       }
@@ -587,7 +594,6 @@ struct TensorTrainAMEN
 
           auto global_residual = crA.TensorTrainMatrix_vector_multiply(crx_rescaled);
           global_residual -= cry;
-          global_residual.round();
           global_res = ::boba::norm_frobenius(global_residual) / norm_cry;
         }
 
@@ -620,23 +626,104 @@ struct TensorTrainAMEN
     return crx;
   }
 
+  /**
+   * @brief Solves a TT system using the process-wide default generator.
+   *
+   * Calling `boba::random::set_seed()` resets the sequence used for residual
+   * enrichment.
+   *
+   * @tparam dimension Tensor dimension.
+   * @tparam space Execution space.
+   * @param crA Square TT matrix.
+   * @param cry Right-hand-side TT.
+   * @param tt_initial_guess Initial TT iterate.
+   * @return The computed TT solution.
+   */
+  template <size_t dimension, execution_space space, typename tensor_train_operator_t>
+    requires(TensorTrainOperatorType<tensor_train_operator_t, dimension, space, data_t>)
+  ::boba::TensorTrain<dimension, space, data_t> solve(
+    const tensor_train_operator_t& crA,
+    const ::boba::TensorTrain<dimension, space, data_t>& cry,
+    const ::boba::TensorTrain<dimension, space, data_t>& tt_initial_guess)
+  {
+    auto& random_generator = ::boba::random::default_context();
+    return solve(crA, cry, tt_initial_guess, random_generator);
+  }
+
 private:
-  template <execution_space space>
+  template <execution_space space, typename tensor_4_t>
   Tensor<6, space, data_t> project_operator_A(
     const Tensor<3, space, data_t>& phia_i,
-    const Tensor<4, space, data_t>& A_core,
+    const tensor_4_t& A_core,
     const Tensor<3, space, data_t>& phia_ip1)
   {
     BOBA_CALI_MARK
     checkpoint();
+
+    // The first contraction creates either [rx, rx_, row, col, rap1] or
+    // [ra, row, col, rxp1, rxp1_]. Estimate both associations before
+    // materializing either intermediate tensor.
+
+    const long double left_environment_extent =
+      static_cast<long double>(phia_i.sizes(0)) * static_cast<long double>(phia_i.sizes(1));
+    const long double right_environment_extent =
+      static_cast<long double>(phia_ip1.sizes(0)) * static_cast<long double>(phia_ip1.sizes(2));
+
+    const auto [operator_left_rank, operator_row_extent, operator_column_extent, operator_right_rank] = A_core.sizes();
+    const long double physical_extent = operator_row_extent * operator_column_extent;
+
+    auto left_first_work = physical_extent * left_environment_extent * operator_right_rank *
+                                  (operator_left_rank + right_environment_extent);
+    auto right_first_work = physical_extent * operator_left_rank * right_environment_extent *
+                                   (operator_right_rank + left_environment_extent);
+    auto left_first_intermediate =
+      physical_extent * left_environment_extent * operator_right_rank;
+    auto right_first_intermediate =
+      physical_extent * operator_left_rank * right_environment_extent;
+
+    // Sparse operator contractions visit stored entries instead of the full
+    // operator extent, so replace the first-contraction cost accordingly.
+    if constexpr (IsSparseCoreType<tensor_4_t>)
+    {
+      const auto operator_nonzeros = static_cast<long double>(A_core.number_nonzeros());
+      left_first_work = operator_nonzeros * left_environment_extent +
+                        physical_extent * left_environment_extent * operator_right_rank * right_environment_extent;
+      right_first_work = operator_nonzeros * right_environment_extent +
+                         physical_extent * operator_left_rank * left_environment_extent * right_environment_extent;
+    }
+
+    const double work_difference = static_cast<double>(right_first_work - left_first_work);
+    const double intermediate_difference = static_cast<double>(right_first_intermediate - left_first_intermediate);
+    const bool work_estimates_equal = is_tiny(work_difference);
+    const bool contract_right_first =
+      (not(work_estimates_equal) and (work_difference < 0.0)) or
+      (work_estimates_equal and
+       not(is_tiny(intermediate_difference)) and (intermediate_difference < 0.0));
+
+    if (contract_right_first)
+    {
+      auto Aphi2 = ::boba::tensor_contraction<1>(
+        {"ra", "row", "col", "rap1"}, A_core,
+        {"rxp1", "rap1", "rxp1_"}, phia_ip1,
+        {"ra", "row", "col", "rxp1", "rxp1_"});
+
+      checkpoint();
+      return ::boba::tensor_contraction<1>(
+        {"rx", "rx_", "ra"}, phia_i,
+        {"ra", "row", "col", "rxp1", "rxp1_"}, Aphi2,
+        {"rx", "rx_", "row", "col", "rxp1", "rxp1_"});
+    }
+
     auto phi1A1 = ::boba::tensor_contraction<1>(
-      {"rx", "rx_", "ra"}, phia_i, {"ra", "row", "col", "rap1"}, A_core, {"rx", "rx_", "row", "col", "rap1"});
+      {"rx", "rx_", "ra"}, phia_i,
+      {"ra", "row", "col", "rap1"}, A_core,
+      {"rx", "rx_", "row", "col", "rap1"});
 
     checkpoint();
-    auto phi1A1phi2 = ::boba::tensor_contraction<1>(
-      {"rx", "rx_", "row", "col", "rap1"}, phi1A1, {"rxp1", "rap1", "rxp1_"}, phia_ip1, {"rx", "rx_", "row", "col", "rxp1", "rxp1_"});
-
-    return phi1A1phi2;
+    return ::boba::tensor_contraction<1>(
+      {"rx", "rx_", "row", "col", "rap1"}, phi1A1,
+      {"rxp1", "rap1", "rxp1_"}, phia_ip1,
+      {"rx", "rx_", "row", "col", "rxp1", "rxp1_"});
   }
 
   template <execution_space space>

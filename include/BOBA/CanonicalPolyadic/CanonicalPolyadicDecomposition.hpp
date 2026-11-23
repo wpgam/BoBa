@@ -671,38 +671,25 @@ struct CanonicalPolyadicDecomposition
    * \return Khatri-Rao product result.
    */
 
-  Matrix<space, data_t> CPD_KhatriRao(size_t skip)
+  Matrix<space, data_t> CPD_KhatriRao(size_t skip) const
   {
-    // Build mats, skipping the 'skip' index
-    std::vector<::boba::Matrix<space, data_t>> mats;
-
-    for (size_t i = 0; i < dimension; ++i)
-    {
-      if (i != skip)
-      {
-        mats.push_back(m_cores[i]);
-      }
-    }
-    if (mats.size() == 0)
+    if (dimension <= 1)
     {
       return ::boba::Matrix<space, data_t>();
     }
 
-    auto output = mats[0];
+    const size_t first = skip == 0 ? 1 : 0;
+    auto output = m_cores[first];
 
-    for (size_t i = 1; i < mats.size(); i++)
+    for (size_t i = first + 1; i < dimension; i++)
     {
-      auto temp = output;
-      output = boba::mode_n_tensor_product(temp, mats[i], 0);
+      if (i != skip)
+      {
+        output = boba::mode_n_tensor_product(output, m_cores[i], 0);
+      }
     }
 
-    auto output_view = output.view();
-    auto weights_view = m_weights.const_view();
-    ::boba::loop<space, 2>(output.sizes(),
-                           [=] __boba_host_device__(Array<index_t, 2> ij)
-    {
-      output_view(ij) *= weights_view(ij[1]);
-    });
+    apply_as_diagonal_right_in_place(m_weights, output);
 
     return output;
   }
@@ -764,17 +751,23 @@ struct CanonicalPolyadicDecomposition
 
   /**
    * \brief Performs ALS_step_direct repeatedly to generate this CPD approximation at a fixed rank.
-   * Since this algorithm uses random initialization, it is not deterministic.
+   * Results are reproducible when the supplied generator starts in the same
+   * state.
    * If one ALS run does not satisfy the convergence tolerances within `ALS_iters`,
    * the decomposition is reinitialized and retried up to `ALS_restarts` times.
    *
+   * \tparam random_generator_t Type satisfying the C++
+   *          UniformRandomBitGenerator requirements.
    * \param[in] input Tensor to approximate.
    * \param[in] rank Rank to which this CPD will approximate `input`.
+   * \param[in,out] random_generator Generator used for all initializations.
    * \return The iteration count of the converged ALS run, or `ALS_iters` if all restarts fail.
    */
 
+  template <typename random_generator_t>
   size_t compress(const boba::Tensor<dimension, space, data_t>& input,
-                  size_t rank)
+                  size_t rank,
+                  random_generator_t& random_generator)
   {
     BOBA_CALI_MARK
     checkpoint();
@@ -795,7 +788,7 @@ struct CanonicalPolyadicDecomposition
       for (size_t d = 0; d < dimension; d++)
       {
         m_cores[d].resize({sizes(d), rank});
-        m_cores[d].fill_with_random();
+        m_cores[d].fill_with_random(random_generator);
       }
       m_weights.resize({rank});
       m_weights.fill_with(1.0);
@@ -849,6 +842,23 @@ struct CanonicalPolyadicDecomposition
     }
 
     return ALS_iters;
+  }
+
+  /**
+   * \brief Compresses a tensor using the process-wide default generator.
+   *
+   * Calling `boba::random::set_seed()` resets the sequence used for random
+   * factor initialization.
+   *
+   * \param[in] input Tensor to approximate.
+   * \param[in] rank Rank to which this CPD will approximate `input`.
+   * \return The iteration count of the converged ALS run, or `ALS_iters` if all restarts fail.
+   */
+  size_t compress(const boba::Tensor<dimension, space, data_t>& input,
+                  size_t rank)
+  {
+    auto& random_generator = ::boba::random::default_context();
+    return compress(input, rank, random_generator);
   }
 
   /**

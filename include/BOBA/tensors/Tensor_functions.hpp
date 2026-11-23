@@ -1662,9 +1662,10 @@ auto norm_l1(Vector<space, data_t> const& vector)
 /**
  * \brief
  * Frobenius norm of a tensor.
+ * \tparam force_naive Use the backend reduction instead of the manual CUDA reduction.
  */
 
-template <size_t dimension, execution_space space, typename data_t>
+template <bool force_naive = false, size_t dimension, execution_space space, typename data_t>
 typename Tensor<dimension, space, data_t>::real_data_t
 norm_frobenius(Tensor<dimension, space, data_t> const& tensor)
 {
@@ -1675,27 +1676,35 @@ norm_frobenius(Tensor<dimension, space, data_t> const& tensor)
 
   real_data_t value = 0.0;
 
-  ::boba::sum_reduce<space>(value, index_t(0), tensor.size(), [=] __boba_host_device__(index_t i, sum_reducer_operator<real_data_t> & local_value)
+  if constexpr(boba_cuda_enabled() and (space == execution_space::CUDA) and not(force_naive))
   {
-    auto abs_local_entry = boba::abs(tensor_data[i]);
-    local_value += abs_local_entry * abs_local_entry;
-  });
+    auto square = []__boba_host_device__(data_t x){ return ::boba::abs(::boba::conj(x)*x); };
+    value = detail::reduction_driver<detail::reduction_t::sum>(tensor.data(), tensor.size(), square);
+  }
+  else
+  {
+    ::boba::sum_reduce<space>(value, index_t(0), tensor.size(), [=] __boba_host_device__(index_t i, sum_reducer_operator<real_data_t> & local_value)
+    {
+      auto entry = tensor_data[i];
+      local_value += ::boba::abs(::boba::conj(entry) * entry);
+    });
+  }
 
   return boba::sqrt(value);
 }
 
-template <execution_space space, typename data_t>
+template <bool force_naive = false, execution_space space, typename data_t>
 auto norm_frobenius(Matrix<space, data_t> const& matrix)
 {
   checkpoint();
-  return norm_frobenius(static_cast<Tensor<2, space, data_t> const&>(matrix));
+  return norm_frobenius<force_naive>(static_cast<Tensor<2, space, data_t> const&>(matrix));
 }
 
-template <execution_space space, typename data_t>
+template <bool force_naive = false, execution_space space, typename data_t>
 auto norm_frobenius(Vector<space, data_t> const& vector)
 {
   checkpoint();
-  return norm_frobenius(static_cast<Tensor<1, space, data_t> const&>(vector));
+  return norm_frobenius<force_naive>(static_cast<Tensor<1, space, data_t> const&>(vector));
 }
 
 /**
@@ -1941,6 +1950,41 @@ data_t max_pointwise_relative_difference(
 // -------------------------------------------------------------------------------------
 // Section: Matrix-matrix
 // -------------------------------------------------------------------------------------
+
+/**
+ * \brief Applies a vector as a right diagonal matrix, `output = input * diag(vector)`.
+ *
+ * This out-of-place overload fuses copying and column scaling into one pass.
+ * Use `apply_as_diagonal_right_in_place` when the input may be modified.
+ *
+ * \param[in] vector Values used to scale the matrix columns.
+ * \param[in] input Matrix whose columns are scaled.
+ * \param[out] output Scaled matrix, resized to match \p input.
+ */
+template <execution_space space, typename vectordata_t, typename matrixdata_t>
+void apply_as_diagonal_right(
+  const ::boba::Vector<space, vectordata_t>& vector,
+  const ::boba::Matrix<space, matrixdata_t>& input,
+  ::boba::Matrix<space, matrixdata_t>& output)
+{
+  BOBA_CALI_MARK
+  checkpoint();
+
+  boba_always_assert_equal(input.cols(), vector.size(), "incompatible dimensions");
+  output.resize(input.sizes());
+
+  const auto input_view = input.const_view();
+  const auto vector_view = vector.const_view();
+  auto output_view = output.view();
+  checkpoint();
+  ::boba::loop<space, 2>(output.sizes(),
+                         [=] __boba_host_device__(Array<index_t, 2> rc)
+  {
+    const index_t col = rc[1];
+    output_view(rc) = input_view(rc) * vector_view({col});
+  });
+  checkpoint();
+}
 
 /**
  * \brief

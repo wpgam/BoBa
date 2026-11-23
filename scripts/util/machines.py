@@ -14,6 +14,12 @@ def get_machine():
         return ('msu_h200', 'MSU', 'cuda_h100')
 
     #
+    # LANL Venadito
+    #
+    if machine.startswith('vt-rfe'):
+        return ('venadito', 'LANL', 'cuda_h100')
+
+    #
     # LLNL machines
     # 
     if 'matrix' in machine:
@@ -34,6 +40,12 @@ def get_machine():
         return ('rzadams', 'TOSS4_CRAY', 'hip')
     if 'toss_4_x86_64_ib_cray' == os.environ.get("SYS_TYPE"):
         return ('tuolumne', 'TOSS4_CRAY', 'hip')
+    #
+    # LANL Darwin (V100 nodes, e.g. the volta-x86 partition); CUDA backend
+    #
+    if (machine.startswith('cn') or machine.startswith('darwin-fe')) and os.path.exists('/projects/darwin-nv'):
+        return ('darwin', 'LANL', 'cuda')
+
     #
     # MSU machines
     #
